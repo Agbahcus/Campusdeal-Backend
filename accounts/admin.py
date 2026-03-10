@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Profile
+from .models import Profile, BankAccount
 
 
 @admin.register(Profile)
@@ -44,3 +44,11 @@ class ProfileAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at')
         }),
     )
+
+
+@admin.register(BankAccount)
+class BankAccountAdmin(admin.ModelAdmin):
+    list_display = ['user', 'account_name', 'account_number', 'bank_name', 'is_primary', 'is_verified', 'created_at']
+    list_filter = ['is_verified', 'is_primary', 'bank_name']
+    search_fields = ['user__username', 'account_name', 'account_number']
+    readonly_fields = ['created_at', 'updated_at', 'recipient_code']

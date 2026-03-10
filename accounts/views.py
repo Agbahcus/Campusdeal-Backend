@@ -3,9 +3,13 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
+from django_ratelimit.decorators import ratelimit
 from datetime import timedelta
 import random
 
@@ -19,6 +23,7 @@ from .serializers import (
 )
 
 
+@ratelimit(key='ip', rate='5/h', method='POST')
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register_user(request):
@@ -35,6 +40,14 @@ def register_user(request):
         "user_type": "student"
     }
     """
+    # Check rate limit
+    was_limited = getattr(request, 'limited', False)
+    if was_limited:
+        return Response(
+            {"error": "Too many registration attempts. Try again later."},
+            status=status.HTTP_429_TOO_MANY_REQUESTS
+        )
+    
     serializer = UserRegistrationSerializer(data=request.data)
     
     if not serializer.is_valid():
@@ -44,6 +57,35 @@ def register_user(request):
         )
     
     data = serializer.validated_data
+    password = data['password']
+    
+    # Validate password strength
+    try:
+        validate_password(password)
+    except DjangoValidationError as e:
+        return Response(
+            {"error": "Password validation failed", "details": list(e.messages)},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Additional password checks
+    if not any(c.isdigit() for c in password):
+        return Response(
+            {"error": "Password must contain at least one number"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    if not any(c.isupper() for c in password):
+        return Response(
+            {"error": "Password must contain at least one uppercase letter"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    if not any(c.islower() for c in password):
+        return Response(
+            {"error": "Password must contain at least one lowercase letter"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     
     # Split full name
     name_parts = data['full_name'].split()
@@ -76,6 +118,13 @@ def register_user(request):
     # For now, we'll return the code in response (ONLY FOR DEVELOPMENT)
     # In production, remove this and only send via SMS
     
+    # Send SMS
+    from .sms_service import termii_service
+    sms_result = termii_service.send_verification_code(data['phone_number'], verification_code)
+    
+    if not sms_result['success']:
+        print(f"SMS failed: {sms_result['error']}")
+    
     print(f"Verification code for {data['phone_number']}: {verification_code}")
     
     return Response({
@@ -83,10 +132,11 @@ def register_user(request):
         "message": "Verification code sent to your phone",
         "phone_masked": f"***{data['phone_number'][-4:]}",
         # REMOVE THIS IN PRODUCTION:
-        "verification_code": verification_code  # Only for testing
+        "verification_code": verification_code if settings.DEBUG else None
     }, status=status.HTTP_201_CREATED)
 
 
+@ratelimit(key='ip', rate='10/h', method='POST')
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def verify_phone(request):
@@ -99,6 +149,12 @@ def verify_phone(request):
         "code": "123456"
     }
     """
+    was_limited = getattr(request, 'limited', False)
+    if was_limited:
+        return Response(
+            {"error": "Too many verification attempts. Try again later."},
+            status=status.HTTP_429_TOO_MANY_REQUESTS
+        )
     serializer = PhoneVerificationSerializer(data=request.data)
     
     if not serializer.is_valid():
@@ -187,12 +243,18 @@ def resend_verification_code(request):
         profile.save()
         
         # TODO: Send SMS
+        from .sms_service import termii_service
+        sms_result = termii_service.send_verification_code(profile.phone_number, verification_code)
+        
+        if not sms_result['success']:
+            print(f"SMS failed: {sms_result['error']}")
+        
         print(f"New verification code for {profile.phone_number}: {verification_code}")
         
         return Response({
             "message": "Verification code resent",
             # REMOVE IN PRODUCTION:
-            "verification_code": verification_code
+            "verification_code": verification_code if settings.DEBUG else None
         }, status=status.HTTP_200_OK)
         
     except Profile.DoesNotExist:
@@ -202,6 +264,7 @@ def resend_verification_code(request):
         )
 
 
+@ratelimit(key='ip', rate='10/m', method='POST')
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login_user(request):
@@ -214,6 +277,12 @@ def login_user(request):
         "password": "securepass123"
     }
     """
+    was_limited = getattr(request, 'limited', False)
+    if was_limited:
+        return Response(
+            {"error": "Too many login attempts. Try again in 1 minute."},
+            status=status.HTTP_429_TOO_MANY_REQUESTS
+        )
     serializer = LoginSerializer(data=request.data)
     
     if not serializer.is_valid():
@@ -326,3 +395,103 @@ def get_user_profile(request, user_id):
             {"error": "User not found"},
             status=status.HTTP_404_NOT_FOUND
         )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def logout_user(request):
+    """
+    Logout user by blacklisting refresh token
+    
+    POST /api/auth/logout/
+    Body: {"refresh_token": "..."}
+    """
+    try:
+        refresh_token = request.data.get("refresh_token")
+        if not refresh_token:
+            return Response(
+                {"error": "Refresh token required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        token = RefreshToken(refresh_token)
+        token.blacklist()
+        
+        return Response(
+            {"message": "Logout successful"},
+            status=status.HTTP_200_OK
+        )
+        
+    except TokenError:
+        return Response(
+            {"error": "Invalid or expired token"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def request_password_reset(request):
+    phone_number = request.data.get('phone_number')
+    if not phone_number:
+        return Response({"error": "Phone number required"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        profile = Profile.objects.get(phone_number=phone_number)
+        reset_code = str(random.randint(100000, 999999))
+        profile.verification_code = reset_code
+        profile.verification_code_created_at = timezone.now()
+        profile.save()
+        
+        from .sms_service import termii_service
+        from django.conf import settings
+        sms_result = termii_service.send_password_reset_code(phone_number, reset_code)
+        if not sms_result['success']:
+            print(f"SMS failed: {sms_result['error']}")
+        print(f"Password reset code for {phone_number}: {reset_code}")
+        
+        return Response({"message": "Reset code sent to your phone", "phone_masked": f"***{phone_number[-4:]}", "reset_code": reset_code if settings.DEBUG else None})
+    except Profile.DoesNotExist:
+        return Response({"error": "Phone number not registered"}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def confirm_password_reset(request):
+    phone_number = request.data.get('phone_number')
+    code = request.data.get('code')
+    new_password = request.data.get('new_password')
+    
+    if not all([phone_number, code, new_password]):
+        return Response({"error": "All fields required"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        profile = Profile.objects.get(phone_number=phone_number)
+        if profile.verification_code != code:
+            return Response({"error": "Invalid reset code"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        code_age = timezone.now() - profile.verification_code_created_at
+        if code_age > timedelta(minutes=10):
+            return Response({"error": "Reset code expired"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            validate_password(new_password)
+        except DjangoValidationError as e:
+            return Response({"error": "Password validation failed", "details": list(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not any(c.isdigit() for c in new_password):
+            return Response({"error": "Password must contain at least one number"}, status=status.HTTP_400_BAD_REQUEST)
+        if not any(c.isupper() for c in new_password):
+            return Response({"error": "Password must contain at least one uppercase letter"}, status=status.HTTP_400_BAD_REQUEST)
+        if not any(c.islower() for c in new_password):
+            return Response({"error": "Password must contain at least one lowercase letter"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        user = profile.user
+        user.set_password(new_password)
+        user.save()
+        profile.verification_code = ''
+        profile.save()
+        
+        return Response({"message": "Password reset successful. You can now login with your new password."})
+    except Profile.DoesNotExist:
+        return Response({"error": "Phone number not registered"}, status=status.HTTP_404_NOT_FOUND)

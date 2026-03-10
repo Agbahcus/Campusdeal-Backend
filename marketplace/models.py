@@ -449,3 +449,39 @@ class HostelListing(models.Model):
         """Increment view count"""
         self.views_count += 1
         self.save(update_fields=['views_count'])
+
+
+class Withdrawal(models.Model):
+    """Withdrawal requests and history"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='withdrawals')
+    bank_account = models.ForeignKey('accounts.BankAccount', on_delete=models.SET_NULL, null=True, blank=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    withdrawal_fee = models.DecimalField(max_digits=10, decimal_places=2, default=25.00)
+    net_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    transfer_code = models.CharField(max_length=100, unique=True, blank=True)
+    reference = models.CharField(max_length=100, unique=True)
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('processing', 'Processing'),
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+        ('reversed', 'Reversed'),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    failure_reason = models.TextField(blank=True)
+    wallet_balance_before = models.DecimalField(max_digits=10, decimal_places=2)
+    wallet_balance_after = models.DecimalField(max_digits=10, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=['reference']),
+        ]
+    
+    def __str__(self):
+        return f"Withdrawal {self.reference} - ₦{self.amount} - {self.status}"

@@ -84,3 +84,24 @@ class Profile(models.Model):
         self.total_ratings += 1
         self.rating = total / self.total_ratings
         self.save()
+
+
+class BankAccount(models.Model):
+    """User's bank account for withdrawals"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bank_accounts')
+    account_number = models.CharField(max_length=10)
+    account_name = models.CharField(max_length=200)
+    bank_name = models.CharField(max_length=100)
+    bank_code = models.CharField(max_length=10)
+    recipient_code = models.CharField(max_length=100, unique=True)
+    is_verified = models.BooleanField(default=False)
+    is_primary = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = [('user', 'account_number', 'bank_code')]
+        indexes = [models.Index(fields=['user', 'is_primary'])]
+    
+    def __str__(self):
+        return f"{self.account_name} - {self.account_number}"

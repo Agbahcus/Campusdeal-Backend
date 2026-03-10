@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from .models import ItemCategory, ItemListing, ItemReview
 from .serializers import (
@@ -13,6 +14,7 @@ from .serializers import (
     ItemListingListSerializer,
     ItemReviewSerializer
 )
+from campusdeal.validators import validate_search_query
 
 
 class StandardResultsSetPagination(PageNumberPagination):
@@ -98,9 +100,16 @@ def browse_listings(request):
     
     search = request.query_params.get('search')
     if search:
-        listings = listings.filter(
-            Q(title__icontains=search) | Q(description__icontains=search)
-        )
+        try:
+            search = validate_search_query(search)
+            listings = listings.filter(
+                Q(title__icontains=search) | Q(description__icontains=search)
+            )
+        except DjangoValidationError as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
     
     # Pagination
     paginator = StandardResultsSetPagination()
@@ -151,6 +160,18 @@ def create_listing(request):
         return Response(
             {"error": "Your account is suspended"},
             status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Check listing limit
+    active_listings = ItemListing.objects.filter(
+        seller=request.user,
+        status='active'
+    ).count()
+    
+    if active_listings >= 100:
+        return Response(
+            {"error": "Maximum 100 active listings allowed"},
+            status=status.HTTP_400_BAD_REQUEST
         )
     
     serializer = ItemListingSerializer(data=request.data, context={'request': request})

@@ -10,6 +10,9 @@ urlpatterns = [
     path('auth/verify-phone/', views.verify_phone, name='verify-phone'),
     path('auth/resend-code/', views.resend_verification_code, name='resend-code'),
     path('auth/login/', views.login_user, name='login'),
+    path('auth/logout/', views.logout_user, name='logout'),
+    path('auth/request-password-reset/', views.request_password_reset, name='request-password-reset'),
+    path('auth/confirm-password-reset/', views.confirm_password_reset, name='confirm-password-reset'),
     path('auth/refresh-token/', TokenRefreshView.as_view(), name='token-refresh'),
     
     # User Profile

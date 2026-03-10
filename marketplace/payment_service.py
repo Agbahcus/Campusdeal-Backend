@@ -235,12 +235,46 @@ class PaystackService:
                 timeout=30
             )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            if data.get('status'):
+                return {
+                    'success': True,
+                    'account_name': data['data']['account_name'],
+                    'account_number': data['data']['account_number']
+                }
+            return {'success': False, 'error': data.get('message', 'Verification failed')}
         except requests.exceptions.RequestException as e:
-            return {
-                'status': False,
-                'message': f'Account verification failed: {str(e)}'
-            }
+            return {'success': False, 'error': str(e)}
+    
+    def verify_account_number(self, account_number, bank_code):
+        return self.verify_account(account_number, bank_code)
+    
+    def create_transfer_recipient(self, account_number, bank_code, account_name):
+        url = f'{self.base_url}/transferrecipient'
+        payload = {'type': 'nuban', 'name': account_name, 'account_number': account_number, 'bank_code': bank_code, 'currency': 'NGN'}
+        try:
+            response = requests.post(url, json=payload, headers=self._get_headers(), timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('status'):
+                return {'success': True, 'recipient_code': data['data']['recipient_code'], 'details': data['data']}
+            return {'success': False, 'error': data.get('message', 'Failed to create recipient')}
+        except requests.exceptions.RequestException as e:
+            return {'success': False, 'error': str(e)}
+    
+    def initiate_transfer(self, amount, recipient_code, reason):
+        url = f'{self.base_url}/transfer'
+        amount_kobo = int(Decimal(str(amount)) * 100)
+        payload = {'source': 'balance', 'amount': amount_kobo, 'recipient': recipient_code, 'reason': reason}
+        try:
+            response = requests.post(url, json=payload, headers=self._get_headers(), timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('status'):
+                return {'success': True, 'transfer_code': data['data']['transfer_code'], 'reference': data['data']['reference'], 'amount': amount, 'status': data['data']['status']}
+            return {'success': False, 'error': data.get('message', 'Transfer failed')}
+        except requests.exceptions.RequestException as e:
+            return {'success': False, 'error': str(e)}
 
 
 # Singleton instance

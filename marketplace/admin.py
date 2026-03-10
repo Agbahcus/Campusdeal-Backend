@@ -7,7 +7,8 @@ from .models import (
     WalletTransaction, 
     ItemReview,
     RefundRequest,
-    HostelListing
+    HostelListing,
+    Withdrawal
 )
 
 
@@ -218,5 +219,31 @@ class HostelListingAdmin(admin.ModelAdmin):
         }),
         ('Metrics', {
             'fields': ('views_count', 'created_at', 'updated_at')
+        }),
+    )
+
+
+@admin.register(Withdrawal)
+class WithdrawalAdmin(admin.ModelAdmin):
+    list_display = ['reference', 'user', 'amount', 'withdrawal_fee', 'net_amount', 'status', 'created_at', 'completed_at']
+    list_filter = ['status', 'created_at']
+    search_fields = ['user__username', 'reference', 'transfer_code']
+    readonly_fields = ['transfer_code', 'reference', 'wallet_balance_before', 'wallet_balance_after', 'created_at', 'completed_at']
+    
+    fieldsets = (
+        ('User Info', {
+            'fields': ('user', 'bank_account')
+        }),
+        ('Amount Details', {
+            'fields': ('amount', 'withdrawal_fee', 'net_amount')
+        }),
+        ('Paystack Details', {
+            'fields': ('transfer_code', 'reference', 'status', 'failure_reason')
+        }),
+        ('Wallet Balance', {
+            'fields': ('wallet_balance_before', 'wallet_balance_after')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'completed_at')
         }),
     )

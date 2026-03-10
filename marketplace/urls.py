@@ -5,6 +5,7 @@ from . import wallet_views
 from . import review_views
 from . import refund_views
 from . import hostel_views
+from . import withdrawal_views
 
 app_name = 'marketplace'
 
@@ -31,6 +32,7 @@ urlpatterns = [
     path('orders/<str:order_id>/checkout/', order_views.checkout_order, name='checkout-order'),
     path('orders/<str:order_id>/update-status/', order_views.update_order_status, name='update-order-status'),
     path('orders/<str:order_id>/confirm-delivery/', order_views.confirm_delivery, name='confirm-delivery'),
+    path('orders/<str:order_id>/cancel/', order_views.cancel_order, name='cancel-order'),
     path('orders/<str:order_id>/status-history/', order_views.order_status_history, name='order-status-history'),
     path('orders/<str:order_id>/review/', review_views.get_order_review, name='order-review'),
     
@@ -43,8 +45,17 @@ urlpatterns = [
     path('wallet/transactions/', wallet_views.get_wallet_transactions, name='wallet-transactions'),
     path('wallet/add-funds/', wallet_views.add_funds_to_wallet, name='add-funds'),
     path('wallet/verify-deposit/', wallet_views.verify_wallet_deposit, name='verify-deposit'),
-    path('wallet/withdraw/', wallet_views.request_withdrawal, name='withdraw'),
     path('wallet/banks/', wallet_views.list_banks, name='list-banks'),
+    
+    # Withdrawals
+    path('wallet/verify-account/', withdrawal_views.verify_bank_account, name='verify-account'),
+    path('wallet/add-bank-account/', withdrawal_views.add_bank_account, name='add-bank-account'),
+    path('wallet/bank-accounts/', withdrawal_views.list_bank_accounts, name='list-bank-accounts'),
+    path('wallet/bank-accounts/<int:account_id>/set-primary/', withdrawal_views.set_primary_bank_account, name='set-primary-account'),
+    path('wallet/bank-accounts/<int:account_id>/', withdrawal_views.delete_bank_account, name='delete-bank-account'),
+    path('wallet/withdraw/', withdrawal_views.withdraw_funds, name='withdraw-funds'),
+    path('wallet/withdrawals/', withdrawal_views.withdrawal_history, name='withdrawal-history'),
+    path('wallet/withdrawal-fees/', withdrawal_views.get_withdrawal_fees, name='withdrawal-fees'),
     
     # Reviews
     path('reviews/', review_views.create_review, name='create-review'),

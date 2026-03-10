@@ -54,103 +54,111 @@ def initiate_order(request):
     buyer_id = serializer.validated_data['buyer_id']
     delivery_method = serializer.validated_data['delivery_method']
     
-    # Get item and validate
-    item = get_object_or_404(ItemListing, id=item_id)
+    try:
+        with db_transaction.atomic():
+            # Lock the item row to prevent concurrent orders
+            item = ItemListing.objects.select_for_update().get(id=item_id)
+            
+            if item.seller != seller:
+                return Response(
+                    {"error": "You don't own this item"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            if item.status != 'active':
+                return Response(
+                    {"error": "Item is not available for sale"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
     
-    if item.seller != seller:
-        return Response(
-            {"error": "You don't own this item"},
-            status=status.HTTP_403_FORBIDDEN
-        )
-    
-    if item.status != 'active':
-        return Response(
-            {"error": "Item is not available for sale"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # Validate delivery method is allowed
-    if delivery_method == 'campusdeal' and not item.allow_campusdeal_delivery:
-        return Response(
-            {"error": "CampusDeal delivery not available for this item"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    if delivery_method == 'seller' and not item.allow_seller_delivery:
-        return Response(
-            {"error": "Seller delivery not available for this item"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    if delivery_method == 'pickup' and not item.allow_pickup:
-        return Response(
-            {"error": "Pickup not available for this item"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # Get buyer
-    from django.contrib.auth.models import User
-    buyer = get_object_or_404(User, id=buyer_id)
-    
-    # Calculate fees
-    item_price = item.price
-    service_fee = item_price * Decimal('0.025')  # 2.5% platform fee
-    
-    # Delivery fee logic
-    if delivery_method == 'campusdeal':
-        # TODO: Calculate based on location/distance
-        # For now, flat rate
-        delivery_fee = Decimal('500.00')
-    else:
-        delivery_fee = Decimal('0.00')
-    
-    total_amount = item_price + service_fee + delivery_fee
-    
-    # Create order
-    with db_transaction.atomic():
-        order = Order.objects.create(
-            item=item,
-            buyer=buyer,
-            seller=seller,
-            delivery_method=delivery_method,
-            item_price=item_price,
-            service_fee=service_fee,
-            delivery_fee=delivery_fee,
-            total_amount=total_amount,
-            status='payment_pending'
-        )
+            # Validate delivery method is allowed
+            if delivery_method == 'campusdeal' and not item.allow_campusdeal_delivery:
+                return Response(
+                    {"error": "CampusDeal delivery not available for this item"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if delivery_method == 'seller' and not item.allow_seller_delivery:
+                return Response(
+                    {"error": "Seller delivery not available for this item"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if delivery_method == 'pickup' and not item.allow_pickup:
+                return Response(
+                    {"error": "Pickup not available for this item"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get buyer
+            from django.contrib.auth.models import User
+            buyer = get_object_or_404(User, id=buyer_id)
+            
+            # Calculate fees
+            item_price = item.price
+            service_fee = item_price * Decimal('0.035')  # 3.5% platform fee
+            
+            # Delivery fee logic
+            if delivery_method == 'campusdeal':
+                delivery_fee = Decimal('500.00')
+            else:
+                delivery_fee = Decimal('0.00')
+            
+            total_amount = item_price + service_fee + delivery_fee
+            
+            # Create order
+            order = Order.objects.create(
+                item=item,
+                buyer=buyer,
+                seller=seller,
+                delivery_method=delivery_method,
+                item_price=item_price,
+                service_fee=service_fee,
+                delivery_fee=delivery_fee,
+                total_amount=total_amount,
+                status='payment_pending'
+            )
+            
+            # Generate waybill if CampusDeal delivery
+            if delivery_method == 'campusdeal':
+                order.waybill_number = f"WB{uuid.uuid4().hex[:8].upper()}"
+                order.save()
+            
+            # Update item status ATOMICALLY
+            item.status = 'pending'
+            item.save()
+            
+            # Log status change
+            OrderStatusHistory.objects.create(
+                order=order,
+                from_status='',
+                to_status='payment_pending',
+                changed_by=seller
+            )
         
-        # Generate waybill if CampusDeal delivery
-        if delivery_method == 'campusdeal':
-            order.waybill_number = f"WB{uuid.uuid4().hex[:8].upper()}"
-            order.save()
+        return Response({
+            "order_id": order.order_id,
+            "total_amount": str(total_amount),
+            "breakdown": {
+                "item_price": str(item_price),
+                "service_fee": str(service_fee),
+                "delivery_fee": str(delivery_fee)
+            },
+            "waybill_number": order.waybill_number,
+            "payment_required": True,
+            "message": "Order created. Waiting for buyer payment."
+        }, status=status.HTTP_201_CREATED)
         
-        # Update item status
-        item.status = 'pending'
-        item.save()
-        
-        # Log status change
-        OrderStatusHistory.objects.create(
-            order=order,
-            from_status='',
-            to_status='payment_pending',
-            changed_by=seller
+    except ItemListing.DoesNotExist:
+        return Response(
+            {"error": "Item not found"},
+            status=status.HTTP_404_NOT_FOUND
         )
-    
-    # TODO: Send push notification to buyer
-    
-    return Response({
-        "order_id": order.order_id,
-        "total_amount": str(total_amount),
-        "breakdown": {
-            "item_price": str(item_price),
-            "service_fee": str(service_fee),
-            "delivery_fee": str(delivery_fee)
-        },
-        "waybill_number": order.waybill_number,
-        "payment_required": True,
-        "message": "Order created. Waiting for buyer payment."
-    }, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        return Response(
+            {"error": "Order creation failed"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 @api_view(['POST'])
@@ -203,59 +211,77 @@ def checkout_order(request, order_id):
 
 
 def process_wallet_payment(order, buyer):
-    """Process payment using wallet balance"""
-    profile = buyer.profile
+    """Process payment using wallet balance with race condition protection"""
     
-    # Check sufficient balance
-    if profile.wallet_balance < order.total_amount:
+    try:
+        with db_transaction.atomic():
+            # Lock the profile row to prevent concurrent access
+            profile = Profile.objects.select_for_update().get(user=buyer)
+            
+            # Check balance
+            if profile.wallet_balance < order.total_amount:
+                return Response({
+                    "error": "Insufficient wallet balance",
+                    "available": str(profile.wallet_balance),
+                    "required": str(order.total_amount)
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Store balance before
+            balance_before = profile.wallet_balance
+            
+            # Use F() expression for atomic update
+            from django.db.models import F
+            Profile.objects.filter(user=buyer).update(
+                wallet_balance=F('wallet_balance') - order.total_amount
+            )
+            
+            # Refresh to get new balance
+            profile.refresh_from_db()
+            
+            # Log transaction
+            WalletTransaction.objects.create(
+                user=buyer,
+                transaction_type='debit',
+                amount=order.total_amount,
+                source='purchase',
+                related_order=order,
+                balance_before=balance_before,
+                balance_after=profile.wallet_balance
+            )
+            
+            # Update order
+            order.status = 'paid'
+            order.funds_held = True
+            order.payment_method = 'wallet'
+            order.paid_at = timezone.now()
+            order.save()
+            
+            # Log status change
+            OrderStatusHistory.objects.create(
+                order=order,
+                from_status='payment_pending',
+                to_status='paid',
+                changed_by=buyer
+            )
+        
         return Response({
-            "error": "Insufficient wallet balance",
-            "available": str(profile.wallet_balance),
-            "required": str(order.total_amount)
-        }, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Process payment in atomic transaction
-    with db_transaction.atomic():
-        # Deduct from wallet
-        balance_before = profile.wallet_balance
-        profile.wallet_balance -= order.total_amount
-        profile.save()
+            "success": True,
+            "order_id": order.order_id,
+            "status": "paid",
+            "message": "Payment successful. Seller will prepare your item.",
+            "waybill_number": order.waybill_number
+        })
         
-        # Log transaction
-        WalletTransaction.objects.create(
-            user=buyer,
-            transaction_type='debit',
-            amount=order.total_amount,
-            source='purchase',
-            related_order=order,
-            balance_before=balance_before,
-            balance_after=profile.wallet_balance
+    except Profile.DoesNotExist:
+        return Response(
+            {"error": "Profile not found"},
+            status=status.HTTP_404_NOT_FOUND
         )
-        
-        # Update order
-        order.status = 'paid'
-        order.funds_held = True
-        order.payment_method = 'wallet'
-        order.paid_at = timezone.now()
-        order.save()
-        
-        # Log status change
-        OrderStatusHistory.objects.create(
-            order=order,
-            from_status='payment_pending',
-            to_status='paid',
-            changed_by=buyer
+    except Exception as e:
+        return Response(
+            {"error": "Payment processing failed"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-    
-    # TODO: Send push notification to seller
-    
-    return Response({
-        "success": True,
-        "order_id": order.order_id,
-        "status": "paid",
-        "message": "Payment successful. Seller will prepare your item.",
-        "waybill_number": order.waybill_number
-    })
 
 
 def initialize_paystack_payment(order, buyer):
@@ -540,17 +566,20 @@ def confirm_delivery(request, order_id):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Update order
+    # Update order with atomic wallet update
     with db_transaction.atomic():
-        order.status = 'completed'
-        order.completed_at = timezone.now()
-        order.save()
-        
-        # Release funds to seller's wallet
-        seller_profile = order.seller.profile
+        # Lock seller profile
+        from django.db.models import F
+        seller_profile = Profile.objects.select_for_update().get(user=order.seller)
         balance_before = seller_profile.wallet_balance
-        seller_profile.wallet_balance += order.item_price
-        seller_profile.save()
+        
+        # Use F() expression for atomic update
+        Profile.objects.filter(user=order.seller).update(
+            wallet_balance=F('wallet_balance') + order.item_price
+        )
+        
+        # Refresh to get new balance
+        seller_profile.refresh_from_db()
         
         # Log wallet transaction
         WalletTransaction.objects.create(
@@ -563,7 +592,9 @@ def confirm_delivery(request, order_id):
             balance_after=seller_profile.wallet_balance
         )
         
-        # Mark order
+        # Update order
+        order.status = 'completed'
+        order.completed_at = timezone.now()
         order.funds_released_to_seller = True
         order.save()
         
@@ -578,8 +609,6 @@ def confirm_delivery(request, order_id):
             to_status='completed',
             changed_by=request.user
         )
-    
-    # TODO: Send notification to seller
     
     return Response({
         "success": True,
@@ -608,3 +637,39 @@ def order_status_history(request, order_id):
     history = order.status_history.all().order_by('-created_at')
     serializer = OrderStatusHistorySerializer(history, many=True)
     return Response(serializer.data)
+
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_order(request, order_id):
+    """Cancel order and process refund if paid"""
+    order = get_object_or_404(Order, order_id=order_id)
+    
+    if request.user not in [order.buyer, order.seller]:
+        return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
+    
+    if order.status in ['completed', 'cancelled', 'refunded']:
+        return Response({"error": "Order cannot be cancelled"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    with db_transaction.atomic():
+        old_status = order.status
+        
+        if order.status == 'paid' and order.funds_held:
+            profile = Profile.objects.select_for_update().get(user=order.buyer)
+            balance_before = profile.wallet_balance
+            Profile.objects.filter(user=order.buyer).update(wallet_balance=F('wallet_balance') + order.total_amount)
+            profile.refresh_from_db()
+            
+            WalletTransaction.objects.create(user=order.buyer, transaction_type='credit', amount=order.total_amount, source='refund', related_order=order, balance_before=balance_before, balance_after=profile.wallet_balance)
+        
+        order.status = 'cancelled'
+        order.save()
+        
+        if order.item.status == 'pending':
+            order.item.status = 'active'
+            order.item.save()
+        
+        OrderStatusHistory.objects.create(order=order, from_status=old_status, to_status='cancelled', changed_by=request.user, notes='Order cancelled by user')
+    
+    return Response({"message": "Order cancelled successfully", "refund_amount": str(order.total_amount) if old_status == 'paid' else "0.00"})
