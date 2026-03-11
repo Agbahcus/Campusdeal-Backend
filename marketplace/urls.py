@@ -6,6 +6,7 @@ from . import review_views
 from . import refund_views
 from . import hostel_views
 from . import withdrawal_views
+from . import setup_views  # TEMPORARY - DELETE AFTER SETUP
 
 app_name = 'marketplace'
 
@@ -82,4 +83,7 @@ urlpatterns = [
     path('hostels/admin/all/', hostel_views.all_hostels_admin, name='all-hostels-admin'),
     path('hostels/<int:hostel_id>/verify/', hostel_views.verify_hostel, name='verify-hostel'),
     path('hostels/admin/stats/', hostel_views.hostel_stats, name='hostel-stats'),
+    
+    # ONE-TIME SETUP (DELETE AFTER USE!)
+    path('setup/', setup_views.initial_setup, name='initial-setup'),
 ]

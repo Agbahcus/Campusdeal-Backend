@@ -1,0 +1,62 @@
+# RAILWAY ENVIRONMENT VARIABLES
+# Copy these to Railway Dashboard → Variables tab
+
+# ============================================
+# DJANGO CORE
+# ============================================
+SECRET_KEY=django-insecure-CHANGE-THIS-TO-RANDOM-50-CHARS-IN-PRODUCTION
+DEBUG=False
+ALLOWED_HOSTS=*.railway.app,*.up.railway.app
+
+# ============================================
+# DATABASE (Auto-set by Railway)
+# ============================================
+# DATABASE_URL is automatically set by Railway
+# Don't add this manually!
+
+# ============================================
+# FRONTEND
+# ============================================
+FRONTEND_URL=https://yourfrontend.vercel.app
+CORS_ALLOWED_ORIGINS=http://localhost:3000,https://yourfrontend.vercel.app
+
+# ============================================
+# PAYSTACK (Payment Gateway)
+# ============================================
+PAYSTACK_SECRET_KEY=sk_test_YOUR_TEST_KEY_HERE
+PAYSTACK_PUBLIC_KEY=pk_test_YOUR_TEST_KEY_HERE
+
+# ============================================
+# SENDCHAMP (SMS Service)
+# ============================================
+SENDCHAMP_PUBLIC_KEY=sendchamp_pk_YOUR_KEY_HERE
+SENDCHAMP_SECRET_KEY=sendchamp_sk_YOUR_KEY_HERE
+SENDCHAMP_SENDER_ID=Sendchamp
+SENDCHAMP_BASE_URL=https://api.sendchamp.com/api/v1
+
+# ============================================
+# CLOUDINARY (Image Storage)
+# ============================================
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+
+# ============================================
+# EMAIL (Optional - for password reset)
+# ============================================
+EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USE_TLS=True
+EMAIL_HOST_USER=your-email@gmail.com
+EMAIL_HOST_PASSWORD=your-app-password
+DEFAULT_FROM_EMAIL=CampusDeal <noreply@campusdeal.com>
+
+# ============================================
+# NOTES:
+# ============================================
+# 1. Replace ALL placeholder values with your actual credentials
+# 2. Use TEST keys for Paystack initially (no KYC wait)
+# 3. DATABASE_URL is set automatically by Railway - don't add it
+# 4. Update FRONTEND_URL when you deploy frontend
+# 5. Generate SECRET_KEY: python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
