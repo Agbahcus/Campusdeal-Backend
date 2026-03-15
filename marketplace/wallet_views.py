@@ -158,15 +158,15 @@ def verify_wallet_deposit(request):
     
     if result.get('status') and result['data']['status'] == 'success':
         amount = Decimal(result['data']['amount']) / 100  # Convert from kobo
-        
-        # Credit wallet
+
+        # Credit wallet and update platform financials (atomic)
         with db_transaction.atomic():
             profile = request.user.profile
             balance_before = profile.wallet_balance
             profile.wallet_balance += amount
             profile.save()
-            
-            # Log transaction
+
+            # Log wallet transaction
             WalletTransaction.objects.create(
                 user=request.user,
                 transaction_type='credit',
@@ -176,7 +176,28 @@ def verify_wallet_deposit(request):
                 balance_before=balance_before,
                 balance_after=profile.wallet_balance
             )
-        
+
+            # UPDATE FINANCIAL TRACKING: record deposit as user funds liability + paystack balance
+            from .models import PlatformFinancials, FinancialTransaction
+            financials = PlatformFinancials.get_instance()
+
+            # Wallet deposit is user money (liability) and increases Paystack balance
+            financials.user_funds_liability += amount
+            financials.paystack_balance += amount
+            financials.save()
+
+            # Audit log
+            FinancialTransaction.objects.create(
+                transaction_type='payment_received',
+                user_liability_change=amount,
+                paystack_balance_change=amount,
+                notes=f"Wallet deposit - User {request.user.id} (reference={reference})",
+                user_liability_after=financials.user_funds_liability,
+                platform_revenue_after=financials.platform_revenue,
+                paystack_balance_after=financials.paystack_balance,
+                created_by=request.user
+            )
+
         return Response({
             "success": True,
             "message": "Wallet credited successfully",

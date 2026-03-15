@@ -2,6 +2,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.exceptions import UnsupportedMediaType
 from django.shortcuts import get_object_or_404
 from django.db import transaction as db_transaction
 from django.db.models import Sum, F
@@ -33,6 +34,16 @@ class WithdrawalSerializer(serializers.ModelSerializer):
         model = Withdrawal
         fields = ['id', 'amount', 'withdrawal_fee', 'net_amount', 'bank_account', 'bank_account_details', 'status', 'failure_reason', 'reference', 'created_at', 'completed_at']
         read_only_fields = ['id', 'withdrawal_fee', 'net_amount', 'status', 'failure_reason', 'reference', 'created_at', 'completed_at']
+
+
+class WithdrawalRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    bank_account_id = serializers.IntegerField(required=False, allow_null=True)
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Amount must be greater than zero")
+        return value
 
 
 @api_view(['POST'])
@@ -128,74 +139,137 @@ def delete_bank_account(request, account_id):
     return Response({"message": "Bank account removed successfully"})
 
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def withdraw_funds(request):
-    user = request.user
-    
+def _get_request_payload(request):
     try:
-        amount = Decimal(str(request.data.get('amount')))
-    except (ValueError, TypeError, InvalidOperation):
-        return Response({"error": "Invalid amount format"}, status=status.HTTP_400_BAD_REQUEST)
-    
+        return request.data
+    except UnsupportedMediaType:
+        underlying = getattr(request, '_request', request)
+        return getattr(underlying, 'POST', {})
+    except AttributeError:
+        return getattr(request, 'POST', {})
+
+
+def _withdraw_funds_impl(request):
+    # internal implementation expects a DRF Request-like object with `.data` and `.user`
+    request_user = getattr(request, 'user', None)
+    underlying_request = getattr(request, '_request', None)
+    if not (hasattr(request_user, 'is_authenticated') and request_user.is_authenticated):
+        if underlying_request is not None:
+            fallback_user = getattr(underlying_request, 'user', None)
+            if hasattr(fallback_user, 'is_authenticated') and fallback_user.is_authenticated:
+                request_user = fallback_user
+    user = request_user
+    payload = _get_request_payload(request)
+
+    serializer = WithdrawalRequestSerializer(data=payload)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    amount = serializer.validated_data['amount']
+    bank_account_id = serializer.validated_data.get('bank_account_id')
+
     if amount <= 0:
         return Response({"error": "Amount must be greater than zero"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if amount < MIN_WITHDRAWAL:
         return Response({"error": f"Minimum withdrawal amount is ₦{MIN_WITHDRAWAL}"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_withdrawals_total = Withdrawal.objects.filter(user=user, created_at__gte=today_start, status__in=['success', 'processing', 'pending']).aggregate(total=Sum('amount'))['total'] or Decimal('0')
-    
+
     if today_withdrawals_total + amount > MAX_WITHDRAWAL_PER_DAY:
         return Response({"error": f"Daily withdrawal limit exceeded", "daily_limit": str(MAX_WITHDRAWAL_PER_DAY), "withdrawn_today": str(today_withdrawals_total), "available_today": str(MAX_WITHDRAWAL_PER_DAY - today_withdrawals_total)}, status=status.HTTP_400_BAD_REQUEST)
-    
-    bank_account_id = request.data.get('bank_account_id')
-    
+
+    bank_account = None
     if bank_account_id:
-        bank_account = get_object_or_404(BankAccount, id=bank_account_id, user=user, is_verified=True)
+        bank_account = BankAccount.objects.filter(id=bank_account_id, user=user, is_verified=True).first()
+        if not bank_account:
+            return Response({"error": "Selected bank account is not available or verified"}, status=status.HTTP_400_BAD_REQUEST)
     else:
         bank_account = BankAccount.objects.filter(user=user, is_primary=True, is_verified=True).first()
         if not bank_account:
             return Response({"error": "No bank account found. Please add a bank account first"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     net_amount = amount - WITHDRAWAL_FEE
-    
+
     if net_amount <= 0:
         return Response({"error": f"Amount too small. Minimum after ₦{WITHDRAWAL_FEE} fee is ₦{MIN_WITHDRAWAL}"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     profile = user.profile
     if profile.wallet_balance < amount:
         return Response({"error": "Insufficient wallet balance", "your_balance": str(profile.wallet_balance), "required": str(amount)}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     try:
         with db_transaction.atomic():
             profile = Profile.objects.select_for_update().get(user=user)
-            
+
             if profile.wallet_balance < amount:
                 return Response({"error": "Insufficient wallet balance"}, status=status.HTTP_400_BAD_REQUEST)
-            
+
             balance_before = profile.wallet_balance
             Profile.objects.filter(user=user).update(wallet_balance=F('wallet_balance') - amount)
             profile.refresh_from_db()
             balance_after = profile.wallet_balance
-            
+
             reference = f"WD{user.id}{int(timezone.now().timestamp())}"
-            
+
             transfer_result = paystack_service.initiate_transfer(amount=net_amount, recipient_code=bank_account.recipient_code, reason=f"CampusDeal withdrawal - {user.get_full_name()}")
-            
+
             if not transfer_result['success']:
                 Profile.objects.filter(user=user).update(wallet_balance=F('wallet_balance') + amount)
                 return Response({"error": f"Transfer failed: {transfer_result['error']}"}, status=status.HTTP_400_BAD_REQUEST)
-            
+
             withdrawal = Withdrawal.objects.create(user=user, bank_account=bank_account, amount=amount, withdrawal_fee=WITHDRAWAL_FEE, net_amount=net_amount, transfer_code=transfer_result['transfer_code'], reference=reference, status='processing', wallet_balance_before=balance_before, wallet_balance_after=balance_after)
-            
+
             WalletTransaction.objects.create(user=user, transaction_type='debit', amount=amount, source='withdrawal', balance_before=balance_before, balance_after=balance_after)
-    
+
+            # UPDATE FINANCIAL TRACKING ⭐ NEW
+            from .models import PlatformFinancials, FinancialTransaction
+            financials = PlatformFinancials.get_instance()
+
+            # User liability decreases (no longer owe this to seller)
+            financials.user_funds_liability -= net_amount
+
+            # Platform revenue increases (keep the withdrawal fee)
+            financials.platform_revenue += WITHDRAWAL_FEE
+
+            # Paystack balance decreases (money left the account)
+            financials.paystack_balance -= net_amount
+            financials.save()
+
+            # Log transaction
+            FinancialTransaction.objects.create(
+                transaction_type='withdrawal_processed',
+                user_liability_change=-net_amount,
+                platform_revenue_change=WITHDRAWAL_FEE,
+                paystack_balance_change=-net_amount,
+                related_withdrawal=withdrawal,
+                notes=f"Withdrawal to {bank_account.account_name}",
+                user_liability_after=financials.user_funds_liability,
+                platform_revenue_after=financials.platform_revenue,
+                paystack_balance_after=financials.paystack_balance
+            )
+
     except Exception as e:
         return Response({"error": f"Withdrawal processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
+
     return Response({"message": "Withdrawal initiated successfully", "withdrawal": WithdrawalSerializer(withdrawal).data, "details": {"total_amount": str(amount), "withdrawal_fee": str(WITHDRAWAL_FEE), "net_amount": str(net_amount), "bank_account": f"{bank_account.account_name} - {bank_account.account_number}", "estimated_time": "Instant to 24 hours (most banks are instant)"}}, status=status.HTTP_201_CREATED)
+
+
+# Decorated API view that expects a Django HttpRequest (normal routing)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def _withdraw_funds_api(request, *args, **kwargs):
+    return _withdraw_funds_impl(request)
+
+
+def withdraw_funds(request, *args, **kwargs):
+    from rest_framework.request import Request as DRFRequest
+    if isinstance(request, DRFRequest) and hasattr(request, '_request'):
+        # unwrap to Django HttpRequest for DRF dispatch
+        return _withdraw_funds_api(request._request, *args, **kwargs)
+    else:
+        return _withdraw_funds_api(request, *args, **kwargs)
 
 
 @api_view(['GET'])

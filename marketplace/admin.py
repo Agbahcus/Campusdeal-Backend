@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.utils.html import format_html
 from .models import (
     ItemCategory, 
     ItemListing, 
@@ -8,7 +9,9 @@ from .models import (
     ItemReview,
     RefundRequest,
     HostelListing,
-    Withdrawal
+    Withdrawal,
+    PlatformFinancials,
+    FinancialTransaction
 )
 
 
@@ -247,3 +250,105 @@ class WithdrawalAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'completed_at')
         }),
     )
+
+
+@admin.register(PlatformFinancials)
+class PlatformFinancialsAdmin(admin.ModelAdmin):
+    list_display = [
+        'last_updated',
+        'paystack_balance_display',
+        'user_liability_display',
+        'platform_revenue_display',
+        'available_display',
+        'reconciliation_display'
+    ]
+    
+    readonly_fields = [
+        'user_funds_liability',
+        'platform_revenue',
+        'paystack_balance',
+        'last_updated',
+        'last_reconciliation',
+    ]
+    
+    def paystack_balance_display(self, obj):
+        return format_html(
+            '<strong style="color: blue;">₦{:,.2f}</strong>',
+            obj.paystack_balance
+        )
+    paystack_balance_display.short_description = 'Paystack Balance'
+    
+    def user_liability_display(self, obj):
+        return format_html(
+            '<span style="color: red;">₦{:,.2f}</span>',
+            obj.user_funds_liability
+        )
+    user_liability_display.short_description = 'Owed to Users'
+    
+    def platform_revenue_display(self, obj):
+        return format_html(
+            '<span style="color: green;">₦{:,.2f}</span>',
+            obj.platform_revenue
+        )
+    platform_revenue_display.short_description = 'Platform Revenue'
+    
+    def available_display(self, obj):
+        available = obj.available_for_platform_withdrawal()
+        color = 'green' if available > 0 else 'red'
+        return format_html(
+            '<strong style="color: {};">₦{:,.2f}</strong>',
+            color,
+            available
+        )
+    available_display.short_description = 'Available to Withdraw'
+    
+    def reconciliation_display(self, obj):
+        status = obj.reconciliation_status()
+        color = 'green' if '✅' in status else 'red'
+        return format_html(
+            '<span style="color: {}">{}</span>',
+            color,
+            status
+        )
+    reconciliation_display.short_description = 'Reconciliation'
+    
+    def has_add_permission(self, request):
+        return not PlatformFinancials.objects.exists()
+    
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(FinancialTransaction)
+class FinancialTransactionAdmin(admin.ModelAdmin):
+    list_display = [
+        'created_at',
+        'transaction_type',
+        'user_liability_change',
+        'platform_revenue_change',
+        'paystack_balance_change',
+        'related_order',
+        'related_withdrawal'
+    ]
+    list_filter = ['transaction_type', 'created_at']
+    search_fields = ['notes', 'related_order__order_id']
+    readonly_fields = [
+        'transaction_type',
+        'user_liability_change',
+        'platform_revenue_change',
+        'paystack_balance_change',
+        'user_liability_after',
+        'platform_revenue_after',
+        'paystack_balance_after',
+        'related_order',
+        'related_withdrawal',
+        'notes',
+        'created_by',
+        'created_at'
+    ]
+    
+    def has_add_permission(self, request):
+        return False
+    
+    def has_delete_permission(self, request, obj=None):
+        return False

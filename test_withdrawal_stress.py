@@ -9,6 +9,8 @@ from decimal import Decimal
 from django.test import TestCase, TransactionTestCase
 from django.contrib.auth.models import User
 from accounts.models import Profile, BankAccount
+from rest_framework.request import Request
+from rest_framework.test import APIRequestFactory, force_authenticate
 from marketplace.models import Withdrawal, WalletTransaction
 
 
@@ -41,6 +43,12 @@ class WithdrawalStressTest(TransactionTestCase):
             is_verified=True,
             is_primary=True
         )
+
+    def _build_withdraw_request(self, data):
+        factory = APIRequestFactory()
+        request = factory.post('/api/marketplace/wallet/withdraw/', data)
+        force_authenticate(request, user=self.user)
+        return Request(request)
     
     def test_concurrent_withdrawals_race_condition(self):
         """
@@ -56,17 +64,9 @@ class WithdrawalStressTest(TransactionTestCase):
         def attempt_withdrawal():
             try:
                 from marketplace.withdrawal_views import withdraw_funds
-                from rest_framework.test import APIRequestFactory
-                from rest_framework.request import Request
-                
-                factory = APIRequestFactory()
-                request = factory.post('/api/marketplace/wallet/withdraw/', {
+                response = withdraw_funds(self._build_withdraw_request({
                     'amount': '6000.00'
-                })
-                request.user = self.user
-                request = Request(request)
-                
-                response = withdraw_funds(request)
+                }))
                 results.append(response.status_code)
             except Exception as e:
                 errors.append(str(e))
@@ -99,16 +99,10 @@ class WithdrawalStressTest(TransactionTestCase):
         print("\n[TEST 2] Negative Amount Withdrawal")
         
         from marketplace.withdrawal_views import withdraw_funds
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
-        factory = APIRequestFactory()
-        request = factory.post('/api/marketplace/wallet/withdraw/', {
+
+        request = self._build_withdraw_request({
             'amount': '-5000.00'
         })
-        request.user = self.user
-        request = Request(request)
-        
         response = withdraw_funds(request)
         
         assert response.status_code == 400, "❌ FAIL: Negative amount accepted"
@@ -119,16 +113,10 @@ class WithdrawalStressTest(TransactionTestCase):
         print("\n[TEST 3] Zero Amount Withdrawal")
         
         from marketplace.withdrawal_views import withdraw_funds
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
-        factory = APIRequestFactory()
-        request = factory.post('/api/marketplace/wallet/withdraw/', {
+
+        request = self._build_withdraw_request({
             'amount': '0.00'
         })
-        request.user = self.user
-        request = Request(request)
-        
         response = withdraw_funds(request)
         
         assert response.status_code == 400, "❌ FAIL: Zero amount accepted"
@@ -139,16 +127,10 @@ class WithdrawalStressTest(TransactionTestCase):
         print("\n[TEST 4] Below Minimum Withdrawal")
         
         from marketplace.withdrawal_views import withdraw_funds
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
-        factory = APIRequestFactory()
-        request = factory.post('/api/marketplace/wallet/withdraw/', {
+
+        request = self._build_withdraw_request({
             'amount': '500.00'
         })
-        request.user = self.user
-        request = Request(request)
-        
         response = withdraw_funds(request)
         
         assert response.status_code == 400, "❌ FAIL: Below minimum accepted"
@@ -159,16 +141,9 @@ class WithdrawalStressTest(TransactionTestCase):
         print("\n[TEST 5] Insufficient Balance Withdrawal")
         
         from marketplace.withdrawal_views import withdraw_funds
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
-        factory = APIRequestFactory()
-        request = factory.post('/api/marketplace/wallet/withdraw/', {
+        request = self._build_withdraw_request({
             'amount': '50000.00'
         })
-        request.user = self.user
-        request = Request(request)
-        
         response = withdraw_funds(request)
         
         assert response.status_code == 400, "❌ FAIL: Insufficient balance accepted"
@@ -183,16 +158,10 @@ class WithdrawalStressTest(TransactionTestCase):
         self.profile.save()
         
         from marketplace.withdrawal_views import withdraw_funds
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
-        factory = APIRequestFactory()
-        request = factory.post('/api/marketplace/wallet/withdraw/', {
+
+        request = self._build_withdraw_request({
             'amount': '550000.00'
         })
-        request.user = self.user
-        request = Request(request)
-        
         response = withdraw_funds(request)
         
         assert response.status_code == 400, "❌ FAIL: Daily limit not enforced"
@@ -203,16 +172,10 @@ class WithdrawalStressTest(TransactionTestCase):
         print("\n[TEST 7] SQL Injection in Amount")
         
         from marketplace.withdrawal_views import withdraw_funds
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
-        factory = APIRequestFactory()
-        request = factory.post('/api/marketplace/wallet/withdraw/', {
+
+        request = self._build_withdraw_request({
             'amount': "5000'; DROP TABLE marketplace_withdrawal; --"
         })
-        request.user = self.user
-        request = Request(request)
-        
         response = withdraw_funds(request)
         
         # Should fail with validation error, not SQL error
@@ -228,9 +191,7 @@ class WithdrawalStressTest(TransactionTestCase):
         print("\n[TEST 8] Invalid Data Types")
         
         from marketplace.withdrawal_views import withdraw_funds
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
+
         test_cases = [
             'abc',
             '5000.00.00',
@@ -241,13 +202,9 @@ class WithdrawalStressTest(TransactionTestCase):
         ]
         
         for test_value in test_cases:
-            factory = APIRequestFactory()
-            request = factory.post('/api/marketplace/wallet/withdraw/', {
+            request = self._build_withdraw_request({
                 'amount': test_value
             })
-            request.user = self.user
-            request = Request(request)
-            
             response = withdraw_funds(request)
             assert response.status_code == 400, f"❌ FAIL: Invalid value '{test_value}' accepted"
         
@@ -261,16 +218,10 @@ class WithdrawalStressTest(TransactionTestCase):
         self.bank_account.delete()
         
         from marketplace.withdrawal_views import withdraw_funds
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
-        factory = APIRequestFactory()
-        request = factory.post('/api/marketplace/wallet/withdraw/', {
+
+        request = self._build_withdraw_request({
             'amount': '5000.00'
         })
-        request.user = self.user
-        request = Request(request)
-        
         response = withdraw_funds(request)
         
         assert response.status_code == 400, "❌ FAIL: Withdrawal without bank account accepted"

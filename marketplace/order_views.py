@@ -263,6 +263,33 @@ def process_wallet_payment(order, buyer):
                 to_status='paid',
                 changed_by=buyer
             )
+            
+            # UPDATE FINANCIAL TRACKING ⭐ NEW
+            from .models import PlatformFinancials, FinancialTransaction
+            financials = PlatformFinancials.get_instance()
+            
+            # Item price = liability (owed to seller)
+            financials.user_funds_liability += order.item_price
+            
+            # Service fee = revenue (platform profit)
+            financials.platform_revenue += order.service_fee
+            
+            # Total in Paystack (wallet payments don't go to Paystack immediately)
+            # We'll handle this when user deposits to wallet
+            financials.save()
+            
+            # Log transaction
+            FinancialTransaction.objects.create(
+                transaction_type='payment_received',
+                user_liability_change=order.item_price,
+                platform_revenue_change=order.service_fee,
+                paystack_balance_change=0,  # Wallet payment, no Paystack change yet
+                related_order=order,
+                notes=f"Wallet payment - {order.order_id}",
+                user_liability_after=financials.user_funds_liability,
+                platform_revenue_after=financials.platform_revenue,
+                paystack_balance_after=financials.paystack_balance
+            )
         
         return Response({
             "success": True,
@@ -431,6 +458,33 @@ def paystack_webhook(request):
                     order=order,
                     from_status='payment_pending',
                     to_status='paid'
+                )
+                
+                # UPDATE FINANCIAL TRACKING ⭐ NEW
+                from .models import PlatformFinancials, FinancialTransaction
+                financials = PlatformFinancials.get_instance()
+                
+                # Item price = liability (owed to seller)
+                financials.user_funds_liability += order.item_price
+                
+                # Service fee = revenue (platform profit)
+                financials.platform_revenue += order.service_fee
+                
+                # Total in Paystack
+                financials.paystack_balance += order.total_amount
+                financials.save()
+                
+                # Log transaction
+                FinancialTransaction.objects.create(
+                    transaction_type='payment_received',
+                    user_liability_change=order.item_price,
+                    platform_revenue_change=order.service_fee,
+                    paystack_balance_change=order.total_amount,
+                    related_order=order,
+                    notes=f"Order payment - {order.order_id}",
+                    user_liability_after=financials.user_funds_liability,
+                    platform_revenue_after=financials.platform_revenue,
+                    paystack_balance_after=financials.paystack_balance
                 )
             
             # TODO: Send notification to seller

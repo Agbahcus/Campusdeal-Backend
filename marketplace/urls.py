@@ -6,6 +6,7 @@ from . import review_views
 from . import refund_views
 from . import hostel_views
 from . import withdrawal_views
+from . import admin_views
 from . import setup_views  # TEMPORARY - DELETE AFTER SETUP
 
 app_name = 'marketplace'
@@ -40,6 +41,9 @@ urlpatterns = [
     # Payments
     path('payments/verify/', order_views.verify_payment, name='verify-payment'),
     path('payments/webhook/', order_views.paystack_webhook, name='paystack-webhook'),
+    # Admin financials
+    path('admin/financials/', admin_views.platform_financial_summary, name='platform-financials'),
+    path('admin/withdraw-profit/', admin_views.withdraw_platform_profit, name='withdraw-platform-profit'),
     
     # Wallet
     path('wallet/balance/', wallet_views.get_wallet_balance, name='wallet-balance'),
