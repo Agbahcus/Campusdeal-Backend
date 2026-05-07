@@ -78,6 +78,8 @@ if not DEBUG:
     CSRF_TRUSTED_ORIGINS.extend([
         'https://*.appliku.app',
         'https://campusdeal.vercel.app',
+        'https://campusdealls.netlify.app',
+        'https://*.netlify.app',
     ])
 
 ROOT_URLCONF = 'campusdeal.urls'
@@ -248,7 +250,8 @@ DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@campusdeal.co
 
 # Production Security Settings
 if not DEBUG:
-    SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=True, cast=bool)
+    SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=False, cast=bool)
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=True, cast=bool)
     CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=True, cast=bool)
     SECURE_BROWSER_XSS_FILTER = True
