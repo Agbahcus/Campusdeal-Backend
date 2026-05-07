@@ -119,8 +119,8 @@ def register_user(request):
     # In production, remove this and only send via SMS
     
     # Send SMS
-    from .sms_service import termii_service
-    sms_result = termii_service.send_verification_code(data['phone_number'], verification_code)
+    from .sendchamp_service import sendchamp_service
+    sms_result = sendchamp_service.send_verification_code(data['phone_number'], verification_code)
     
     if not sms_result['success']:
         print(f"SMS failed: {sms_result['error']}")
@@ -242,9 +242,9 @@ def resend_verification_code(request):
         profile.verification_code_created_at = timezone.now()
         profile.save()
         
-        # TODO: Send SMS
-        from .sms_service import termii_service
-        sms_result = termii_service.send_verification_code(profile.phone_number, verification_code)
+        # Send SMS
+        from .sendchamp_service import sendchamp_service
+        sms_result = sendchamp_service.send_verification_code(profile.phone_number, verification_code)
         
         if not sms_result['success']:
             print(f"SMS failed: {sms_result['error']}")
@@ -443,9 +443,9 @@ def request_password_reset(request):
         profile.verification_code_created_at = timezone.now()
         profile.save()
         
-        from .sms_service import termii_service
+        from .sendchamp_service import sendchamp_service
         from django.conf import settings
-        sms_result = termii_service.send_password_reset_code(phone_number, reset_code)
+        sms_result = sendchamp_service.send_password_reset_code(phone_number, reset_code)
         if not sms_result['success']:
             print(f"SMS failed: {sms_result['error']}")
         print(f"Password reset code for {phone_number}: {reset_code}")

@@ -43,3 +43,10 @@ python-dotenv==1.0.1
 
 # Rate limiting for security
 django-ratelimit==4.1.0
+
+# Cloudinary for media storage (production)
+cloudinary==1.41.0
+django-cloudinary-storage==0.3.0
+
+# Sentry for error tracking (production)
+sentry-sdk==1.40.0

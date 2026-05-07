@@ -47,6 +47,8 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'cloudinary_storage',
+    'cloudinary',
     
     # Local apps
     'accounts',
@@ -70,6 +72,13 @@ MIDDLEWARE = [
 CSRF_TRUSTED_ORIGINS = [
     'https://api.paystack.co',
 ]
+
+# Add production domains when DEBUG is False
+if not DEBUG:
+    CSRF_TRUSTED_ORIGINS.extend([
+        'https://*.appliku.app',
+        'https://campusdeal.vercel.app',
+    ])
 
 ROOT_URLCONF = 'campusdeal.urls'
 
@@ -149,9 +158,23 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
+# Cloudinary Configuration
+import cloudinary
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': config('CLOUDINARY_CLOUD_NAME', default=''),
+    'API_KEY': config('CLOUDINARY_API_KEY', default=''),
+    'API_SECRET': config('CLOUDINARY_API_SECRET', default=''),
+}
+
 # Media files (User uploads)
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+if not DEBUG and CLOUDINARY_STORAGE['CLOUD_NAME']:
+    # Production: Use Cloudinary
+    DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
+    MEDIA_URL = '/media/'  # Cloudinary will handle this
+else:
+    # Development: Use local storage
+    MEDIA_URL = '/media/'
+    MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
@@ -190,7 +213,13 @@ CORS_ALLOWED_ORIGINS = config(
 
 CORS_ALLOW_CREDENTIALS = True
 
-# SMS Configuration (Termii for Nigeria)
+# SMS Configuration (Sendchamp for Nigeria)
+SENDCHAMP_PUBLIC_KEY = config('SENDCHAMP_PUBLIC_KEY', default='')
+SENDCHAMP_SECRET_KEY = config('SENDCHAMP_SECRET_KEY', default='')
+SENDCHAMP_SENDER_ID = config('SENDCHAMP_SENDER_ID', default='Sendchamp')
+SENDCHAMP_BASE_URL = config('SENDCHAMP_BASE_URL', default='https://api.sendchamp.com/api/v1')
+
+# Legacy Termii (keeping for backward compatibility, but not used)
 TERMII_API_KEY = config('TERMII_API_KEY', default='')
 TERMII_SENDER_ID = config('TERMII_SENDER_ID', default='CampusDeal')
 TERMII_API_URL = 'https://api.ng.termii.com/api/sms/send'
@@ -216,3 +245,96 @@ EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@campusdeal.com')
+
+# Production Security Settings
+if not DEBUG:
+    SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=True, cast=bool)
+    SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=True, cast=bool)
+    CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=True, cast=bool)
+    SECURE_BROWSER_XSS_FILTER = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_HSTS_SECONDS = 31536000  # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    X_FRAME_OPTIONS = 'DENY'
+
+# Logging Configuration
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO' if not DEBUG else 'DEBUG',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'marketplace': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'accounts': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
+
+# Sentry Configuration (Error Tracking)
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
+
+if not DEBUG:
+    SENTRY_DSN = config('SENTRY_DSN', default='')
+    if SENTRY_DSN:
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            integrations=[DjangoIntegration()],
+            traces_sample_rate=0.1,
+            send_default_pii=False,
+            environment='production'
+        )
+
+# Validate critical environment variables in production
+if not DEBUG:
+    required_vars = [
+        'SECRET_KEY',
+        'DATABASE_URL',
+        'PAYSTACK_SECRET_KEY',
+        'PAYSTACK_PUBLIC_KEY',
+        'SENDCHAMP_SECRET_KEY',
+    ]
+    
+    missing_vars = [var for var in required_vars if not config(var, default='')]
+    
+    if missing_vars:
+        import sys
+        print(f"ERROR: Missing required environment variables: {', '.join(missing_vars)}")
+        print("Application cannot start without these variables.")
+        sys.exit(1)

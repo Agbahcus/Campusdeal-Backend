@@ -3,45 +3,56 @@ services:
     name: campusdeal-backend
     env: python
     plan: free
-    region: fremont
+    region: frankfurt
     branch: main
     buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate
-    startCommand: gunicorn campusdeal.wsgi:application --bind 0.0.0.0:$PORT
+    startCommand: gunicorn campusdeal.wsgi:application --bind 0.0.0.0:$PORT --workers 4 --timeout 120 --access-logfile - --error-logfile -
+    healthCheckPath: /health/
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
       - key: SECRET_KEY
-        fromService: secret
+        generateValue: true
       - key: DEBUG
         value: "False"
       - key: ALLOWED_HOSTS
-        value: "campusdeal-backend.onrender.com"
+        value: ".onrender.com"
       - key: FRONTEND_URL
-        value: "https://your-frontend-host.com"
+        value: "https://campusdeal.vercel.app"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "http://localhost:3000,https://campusdeal.vercel.app"
       - key: DATABASE_URL
-        fromService: campusdeal-db
+        fromDatabase:
+          name: campusdeal-db
+          property: connectionString
       - key: PAYSTACK_PUBLIC_KEY
-        fromService: secret
+        sync: false
       - key: PAYSTACK_SECRET_KEY
-        fromService: secret
+        sync: false
       - key: SENDCHAMP_PUBLIC_KEY
-        fromService: secret
+        sync: false
       - key: SENDCHAMP_SECRET_KEY
-        fromService: secret
+        sync: false
       - key: SENDCHAMP_SENDER_ID
         value: "Sendchamp"
       - key: SENDCHAMP_BASE_URL
         value: "https://api.sendchamp.com/api/v1"
       - key: CLOUDINARY_CLOUD_NAME
-        fromService: secret
+        value: "campusdeal"
       - key: CLOUDINARY_API_KEY
-        fromService: secret
+        sync: false
       - key: CLOUDINARY_API_SECRET
-        fromService: secret
-      - key: CORS_ALLOWED_ORIGINS
-        value: "https://your-frontend-host.com"
+        sync: false
+      - key: SECURE_SSL_REDIRECT
+        value: "True"
+      - key: SESSION_COOKIE_SECURE
+        value: "True"
+      - key: CSRF_COOKIE_SECURE
+        value: "True"
 
 databases:
   - name: campusdeal-db
-    engine: postgresql
+    databaseName: campusdeal
+    user: campusdeal
     plan: free
-    region: fremont
-    version: 15
+    region: frankfurt
