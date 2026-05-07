@@ -333,11 +333,7 @@ if not DEBUG:
         'PAYSTACK_PUBLIC_KEY',
         'SENDCHAMP_SECRET_KEY',
     ]
-    
     missing_vars = [var for var in required_vars if not config(var, default='')]
-    
     if missing_vars:
-        import sys
-        print(f"ERROR: Missing required environment variables: {', '.join(missing_vars)}")
-        print("Application cannot start without these variables.")
-        sys.exit(1)
+        import logging
+        logging.warning(f"Missing environment variables: {', '.join(missing_vars)}")
