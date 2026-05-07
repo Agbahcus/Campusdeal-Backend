@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Collect static files
-RUN python manage.py collectstatic --noinput
+RUN python manage.py collectstatic --noinput --clear
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && \
@@ -40,9 +40,10 @@ EXPOSE ${PORT}
 # Run gunicorn
 CMD gunicorn campusdeal.wsgi:application \
     --bind 0.0.0.0:${PORT} \
-    --workers 4 \
+    --workers 1 \
     --threads 2 \
     --timeout 120 \
+    --preload \
     --access-logfile - \
     --error-logfile - \
-    --log-level info
+    --log-level debug
