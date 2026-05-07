@@ -8,10 +8,14 @@ from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.conf import settings
 from django.utils import timezone
 from django_ratelimit.decorators import ratelimit
 from datetime import timedelta
 import random
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .models import Profile
 from .serializers import (
@@ -118,20 +122,21 @@ def register_user(request):
     # For now, we'll return the code in response (ONLY FOR DEVELOPMENT)
     # In production, remove this and only send via SMS
     
-    # Send SMS
-    from .sendchamp_service import sendchamp_service
-    sms_result = sendchamp_service.send_verification_code(data['phone_number'], verification_code)
-    
-    if not sms_result['success']:
-        print(f"SMS failed: {sms_result['error']}")
-    
-    print(f"Verification code for {data['phone_number']}: {verification_code}")
-    
+    # Send SMS (non-blocking — registration succeeds even if SMS fails)
+    try:
+        from .sendchamp_service import sendchamp_service
+        sms_result = sendchamp_service.send_verification_code(data['phone_number'], verification_code)
+        if not sms_result['success']:
+            logger.warning(f"SMS failed for {data['phone_number']}: {sms_result['error']}")
+    except Exception as e:
+        logger.warning(f"SMS exception for {data['phone_number']}: {e}")
+
+    logger.info(f"Verification code for {data['phone_number']}: {verification_code}")
+
     return Response({
         "user_id": user.id,
         "message": "Verification code sent to your phone",
         "phone_masked": f"***{data['phone_number'][-4:]}",
-        # REMOVE THIS IN PRODUCTION:
         "verification_code": verification_code if settings.DEBUG else None
     }, status=status.HTTP_201_CREATED)
 
@@ -242,18 +247,19 @@ def resend_verification_code(request):
         profile.verification_code_created_at = timezone.now()
         profile.save()
         
-        # Send SMS
-        from .sendchamp_service import sendchamp_service
-        sms_result = sendchamp_service.send_verification_code(profile.phone_number, verification_code)
-        
-        if not sms_result['success']:
-            print(f"SMS failed: {sms_result['error']}")
-        
-        print(f"New verification code for {profile.phone_number}: {verification_code}")
-        
+        # Send SMS (non-blocking)
+        try:
+            from .sendchamp_service import sendchamp_service
+            sms_result = sendchamp_service.send_verification_code(profile.phone_number, verification_code)
+            if not sms_result['success']:
+                logger.warning(f"SMS failed for {profile.phone_number}: {sms_result['error']}")
+        except Exception as e:
+            logger.warning(f"SMS exception: {e}")
+
+        logger.info(f"New verification code for {profile.phone_number}: {verification_code}")
+
         return Response({
             "message": "Verification code resent",
-            # REMOVE IN PRODUCTION:
             "verification_code": verification_code if settings.DEBUG else None
         }, status=status.HTTP_200_OK)
         
