@@ -216,10 +216,19 @@ CORS_ALLOWED_ORIGINS = config(
 CORS_ALLOW_CREDENTIALS = True
 
 # SMS Configuration (Sendchamp for Nigeria)
+SMS_PROVIDER = config('SMS_PROVIDER', default='sendchamp')
+
 SENDCHAMP_PUBLIC_KEY = config('SENDCHAMP_PUBLIC_KEY', default='')
 SENDCHAMP_SECRET_KEY = config('SENDCHAMP_SECRET_KEY', default='')
 SENDCHAMP_SENDER_ID = config('SENDCHAMP_SENDER_ID', default='Sendchamp')
 SENDCHAMP_BASE_URL = config('SENDCHAMP_BASE_URL', default='https://api.sendchamp.com/api/v1')
+
+# SmartSMS (smartsms.ng)
+SMARTSMS_USERNAME = config('SMARTSMS_USERNAME', default='')
+SMARTSMS_API_KEY = config('SMARTSMS_API_KEY', default='')
+SMARTSMS_SENDER_ID = config('SMARTSMS_SENDER_ID', default='CampusDeal')
+SMARTSMS_BASE_URL = config('SMARTSMS_BASE_URL', default='https://www.smartsms.ng/api')
+SMARTSMS_DNDSENDER = config('SMARTSMS_DNDSENDER', default=0, cast=int)
 
 # Legacy Termii (keeping for backward compatibility, but not used)
 TERMII_API_KEY = config('TERMII_API_KEY', default='')

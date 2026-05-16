@@ -124,8 +124,9 @@ def register_user(request):
     
     # Send SMS (non-blocking — registration succeeds even if SMS fails)
     try:
-        from .sendchamp_service import sendchamp_service
-        sms_result = sendchamp_service.send_verification_code(data['phone_number'], verification_code)
+        from .sms_provider import get_sms_service
+        sms_service = get_sms_service()
+        sms_result = sms_service.send_verification_code(data['phone_number'], verification_code)
         if not sms_result['success']:
             logger.warning(f"SMS failed for {data['phone_number']}: {sms_result['error']}")
     except Exception as e:
@@ -249,8 +250,9 @@ def resend_verification_code(request):
         
         # Send SMS (non-blocking)
         try:
-            from .sendchamp_service import sendchamp_service
-            sms_result = sendchamp_service.send_verification_code(profile.phone_number, verification_code)
+            from .sms_provider import get_sms_service
+            sms_service = get_sms_service()
+            sms_result = sms_service.send_verification_code(profile.phone_number, verification_code)
             if not sms_result['success']:
                 logger.warning(f"SMS failed for {profile.phone_number}: {sms_result['error']}")
         except Exception as e:
@@ -449,9 +451,10 @@ def request_password_reset(request):
         profile.verification_code_created_at = timezone.now()
         profile.save()
         
-        from .sendchamp_service import sendchamp_service
+        from .sms_provider import get_sms_service
         from django.conf import settings
-        sms_result = sendchamp_service.send_password_reset_code(phone_number, reset_code)
+        sms_service = get_sms_service()
+        sms_result = sms_service.send_password_reset_code(phone_number, reset_code)
         if not sms_result['success']:
             print(f"SMS failed: {sms_result['error']}")
         print(f"Password reset code for {phone_number}: {reset_code}")
