@@ -14,6 +14,7 @@ from rest_framework import serializers
 from .models import Withdrawal, WalletTransaction
 from accounts.models import Profile, BankAccount
 from .payment_service import paystack_service
+from .ledger_service import FinancialLedgerService
 
 MIN_WITHDRAWAL = Decimal('1000.00')
 MAX_WITHDRAWAL_PER_DAY = Decimal('500000.00')
@@ -97,7 +98,8 @@ def add_bank_account(request):
     
     is_primary = not BankAccount.objects.filter(user=user).exists()
     
-    if request.data.get('set_as_primary') == True or is_primary:
+    set_as_primary = request.data.get('set_as_primary')
+    if str(set_as_primary).lower() in {'true', '1', 'yes', 'on'} or is_primary:
         BankAccount.objects.filter(user=user).update(is_primary=False)
         is_primary = True
     
@@ -223,31 +225,13 @@ def _withdraw_funds_impl(request):
 
             WalletTransaction.objects.create(user=user, transaction_type='debit', amount=amount, source='withdrawal', balance_before=balance_before, balance_after=balance_after)
 
-            # UPDATE FINANCIAL TRACKING ⭐ NEW
-            from .models import PlatformFinancials, FinancialTransaction
-            financials = PlatformFinancials.get_instance()
-
-            # User liability decreases (no longer owe this to seller)
-            financials.user_funds_liability -= net_amount
-
-            # Platform revenue increases (keep the withdrawal fee)
-            financials.platform_revenue += WITHDRAWAL_FEE
-
-            # Paystack balance decreases (money left the account)
-            financials.paystack_balance -= net_amount
-            financials.save()
-
-            # Log transaction
-            FinancialTransaction.objects.create(
-                transaction_type='withdrawal_processed',
-                user_liability_change=-net_amount,
-                platform_revenue_change=WITHDRAWAL_FEE,
-                paystack_balance_change=-net_amount,
+            FinancialLedgerService.record_withdrawal(
+                user=user,
+                amount=amount,
+                withdrawal_fee=WITHDRAWAL_FEE,
+                net_amount=net_amount,
                 related_withdrawal=withdrawal,
-                notes=f"Withdrawal to {bank_account.account_name}",
-                user_liability_after=financials.user_funds_liability,
-                platform_revenue_after=financials.platform_revenue,
-                paystack_balance_after=financials.paystack_balance
+                created_by=user,
             )
 
     except Exception as e:

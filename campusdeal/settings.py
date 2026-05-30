@@ -14,7 +14,19 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-in-production')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config('DEBUG', default=True, cast=bool)
+def _parse_debug_flag(value, default=True):
+    if value is None:
+        return default
+
+    normalized = str(value).strip().lower()
+    if normalized in {'1', 'true', 't', 'yes', 'y', 'on', 'release', 'prod', 'production', 'live'}:
+        return True
+    if normalized in {'0', 'false', 'f', 'no', 'n', 'off'}:
+        return False
+    return default
+
+
+DEBUG = _parse_debug_flag(os.environ.get('DEBUG'), default=True)
 
 ALLOWED_HOSTS = config(
     'ALLOWED_HOSTS',
@@ -34,6 +46,16 @@ RATELIMIT_ENABLE = True
 RATELIMIT_USE_CACHE = 'default'
 
 # Application definition
+OPTIONAL_APPS = []
+try:
+    import cloudinary  # type: ignore
+    OPTIONAL_APPS.extend([
+        'cloudinary_storage',
+        'cloudinary',
+    ])
+except ModuleNotFoundError:
+    cloudinary = None
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -47,9 +69,8 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
-    'cloudinary_storage',
-    'cloudinary',
-    
+    *OPTIONAL_APPS,
+
     # Local apps
     'accounts',
     'marketplace',
@@ -161,7 +182,6 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Cloudinary Configuration
-import cloudinary
 CLOUDINARY_STORAGE = {
     'CLOUD_NAME': config('CLOUDINARY_CLOUD_NAME', default=''),
     'API_KEY': config('CLOUDINARY_API_KEY', default=''),
@@ -169,7 +189,7 @@ CLOUDINARY_STORAGE = {
 }
 
 # Media files (User uploads)
-if not DEBUG and CLOUDINARY_STORAGE['CLOUD_NAME']:
+if not DEBUG and CLOUDINARY_STORAGE['CLOUD_NAME'] and cloudinary is not None:
     # Production: Use Cloudinary
     DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
     MEDIA_URL = '/media/'  # Cloudinary will handle this
@@ -319,19 +339,22 @@ LOGGING = {
 }
 
 # Sentry Configuration (Error Tracking)
-import sentry_sdk
-from sentry_sdk.integrations.django import DjangoIntegration
-
 if not DEBUG:
     SENTRY_DSN = config('SENTRY_DSN', default='')
     if SENTRY_DSN:
-        sentry_sdk.init(
-            dsn=SENTRY_DSN,
-            integrations=[DjangoIntegration()],
-            traces_sample_rate=0.1,
-            send_default_pii=False,
-            environment='production'
-        )
+        try:
+            import sentry_sdk
+            from sentry_sdk.integrations.django import DjangoIntegration
+
+            sentry_sdk.init(
+                dsn=SENTRY_DSN,
+                integrations=[DjangoIntegration()],
+                traces_sample_rate=0.1,
+                send_default_pii=False,
+                environment='production'
+            )
+        except ModuleNotFoundError:
+            pass
 
 # Validate critical environment variables in production
 if not DEBUG:

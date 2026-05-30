@@ -1,6 +1,6 @@
 from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, permission_classes, action
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
@@ -39,14 +39,13 @@ def list_categories(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminUser])
 def create_category(request):
     """
     Create new category (Admin only in production)
     
     POST /api/marketplace/categories/
     """
-    # TODO: Add admin permission check
     serializer = ItemCategorySerializer(data=request.data)
     if serializer.is_valid():
         serializer.save()

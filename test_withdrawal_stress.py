@@ -5,6 +5,7 @@ Tests for race conditions, security vulnerabilities, and edge cases
 
 import threading
 import time
+import sys
 from decimal import Decimal
 from django.test import TestCase, TransactionTestCase
 from django.contrib.auth.models import User
@@ -12,6 +13,9 @@ from accounts.models import Profile, BankAccount
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory, force_authenticate
 from marketplace.models import Withdrawal, WalletTransaction
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 
 class WithdrawalStressTest(TransactionTestCase):

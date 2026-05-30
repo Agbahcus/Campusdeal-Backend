@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from .models import PlatformFinancials, FinancialTransaction
 from .payment_service import paystack_service
+from .ledger_service import FinancialLedgerService
 
 
 @api_view(['POST'])
@@ -19,6 +20,9 @@ def withdraw_platform_profit(request):
         amount = Decimal(str(request.data.get('amount')))
     except:
         return Response({"error": "Invalid amount"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if amount <= 0:
+        return Response({"error": "Amount must be greater than zero"}, status=status.HTTP_400_BAD_REQUEST)
 
     bank_account_number = request.data.get('bank_account_number')
     bank_code = request.data.get('bank_code')
@@ -46,41 +50,38 @@ def withdraw_platform_profit(request):
         return Response({"error": f"Bank verification failed: {verification['error']}"}, status=status.HTTP_400_BAD_REQUEST)
 
     # Create recipient
-    recipient = paystack_service.create_transfer_recipient(bank_account_number=bank_account_number, bank_code=bank_code, account_name=verification['account_name'])
+    recipient = paystack_service.create_transfer_recipient(
+        account_number=bank_account_number,
+        bank_code=bank_code,
+        account_name=verification['account_name'],
+    )
 
     if not recipient['success']:
         return Response({"error": f"Failed to create recipient: {recipient['error']}"}, status=status.HTTP_400_BAD_REQUEST)
 
     # Process transfer
-    transfer = paystack_service.initiate_transfer(amount=amount, recipient_code=recipient['recipient_code'], reason="Platform profit withdrawal")
+    transfer = paystack_service.initiate_transfer(
+        amount=amount,
+        recipient_code=recipient['recipient_code'],
+        reason="Platform profit withdrawal",
+    )
 
     if not transfer['success']:
         return Response({"error": f"Transfer failed: {transfer['error']}"}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Update financials
-    with db_transaction.atomic():
-        financials.platform_revenue -= amount
-        financials.paystack_balance -= amount
-        financials.save()
-
-        FinancialTransaction.objects.create(
-            transaction_type='platform_withdrawal',
-            platform_revenue_change=-amount,
-            paystack_balance_change=-amount,
-            notes=f"Platform withdrawal to {verification['account_name']}",
-            created_by=request.user,
-            user_liability_after=financials.user_funds_liability,
-            platform_revenue_after=financials.platform_revenue,
-            paystack_balance_after=financials.paystack_balance
-        )
+    FinancialLedgerService.record_platform_withdrawal(
+        amount=amount,
+        account_name=verification['account_name'],
+        created_by=request.user,
+    )
 
     return Response({
         "message": "Platform withdrawal successful",
         "amount": str(amount),
         "recipient": verification['account_name'],
         "reference": transfer.get('reference'),
-        "remaining_revenue": str(financials.platform_revenue),
-        "remaining_available": str(financials.available_for_platform_withdrawal())
+        "remaining_revenue": str(PlatformFinancials.get_instance().platform_revenue),
+        "remaining_available": str(PlatformFinancials.get_instance().available_for_platform_withdrawal())
     })
 
 

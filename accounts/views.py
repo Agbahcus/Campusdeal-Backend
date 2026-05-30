@@ -132,7 +132,7 @@ def register_user(request):
     except Exception as e:
         logger.warning(f"SMS exception for {data['phone_number']}: {e}")
 
-    logger.info(f"Verification code for {data['phone_number']}: {verification_code}")
+    logger.info("Verification code generated for %s", data['phone_number'])
 
     return Response({
         "user_id": user.id,
@@ -188,7 +188,13 @@ def verify_phone(request):
                 {"error": "Invalid verification code"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
+        if not profile.verification_code_created_at:
+            return Response(
+                {"error": "Verification code expired. Request a new one."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # Check code expiration (10 minutes)
         code_age = timezone.now() - profile.verification_code_created_at
         if code_age > timedelta(minutes=10):
@@ -258,7 +264,7 @@ def resend_verification_code(request):
         except Exception as e:
             logger.warning(f"SMS exception: {e}")
 
-        logger.info(f"New verification code for {profile.phone_number}: {verification_code}")
+        logger.info("Verification code resent for %s", profile.phone_number)
 
         return Response({
             "message": "Verification code resent",
@@ -456,9 +462,8 @@ def request_password_reset(request):
         sms_service = get_sms_service()
         sms_result = sms_service.send_password_reset_code(phone_number, reset_code)
         if not sms_result['success']:
-            print(f"SMS failed: {sms_result['error']}")
-        print(f"Password reset code for {phone_number}: {reset_code}")
-        
+            logger.warning("Password reset SMS failed for %s: %s", phone_number, sms_result['error'])
+
         return Response({"message": "Reset code sent to your phone", "phone_masked": f"***{phone_number[-4:]}", "reset_code": reset_code if settings.DEBUG else None})
     except Profile.DoesNotExist:
         return Response({"error": "Phone number not registered"}, status=status.HTTP_404_NOT_FOUND)
@@ -478,6 +483,9 @@ def confirm_password_reset(request):
         profile = Profile.objects.get(phone_number=phone_number)
         if profile.verification_code != code:
             return Response({"error": "Invalid reset code"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not profile.verification_code_created_at:
+            return Response({"error": "Reset code expired"}, status=status.HTTP_400_BAD_REQUEST)
         
         code_age = timezone.now() - profile.verification_code_created_at
         if code_age > timedelta(minutes=10):

@@ -7,6 +7,7 @@ from . import refund_views
 from . import hostel_views
 from . import withdrawal_views
 from . import admin_views
+from django.conf import settings
 from . import setup_views  # TEMPORARY - DELETE AFTER SETUP
 
 app_name = 'marketplace'
@@ -88,6 +89,9 @@ urlpatterns = [
     path('hostels/<int:hostel_id>/verify/', hostel_views.verify_hostel, name='verify-hostel'),
     path('hostels/admin/stats/', hostel_views.hostel_stats, name='hostel-stats'),
     
-    # ONE-TIME SETUP (DELETE AFTER USE!)
-    path('setup/', setup_views.initial_setup, name='initial-setup'),
 ]
+
+if settings.DEBUG:
+    urlpatterns.append(
+        path('setup/', setup_views.initial_setup, name='initial-setup')
+    )

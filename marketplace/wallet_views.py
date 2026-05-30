@@ -10,6 +10,7 @@ from decimal import Decimal
 from .models import WalletTransaction
 from .serializers import WalletTransactionSerializer
 from .payment_service import paystack_service
+from .ledger_service import FinancialLedgerService
 
 
 class WalletPagination(PageNumberPagination):
@@ -155,54 +156,31 @@ def verify_wallet_deposit(request):
     
     # Verify with Paystack
     result = paystack_service.verify_payment(reference)
-    
+
     if result.get('status') and result['data']['status'] == 'success':
+        metadata = result['data'].get('metadata') or {}
+        verified_user_id = metadata.get('user_id')
+        if verified_user_id and int(verified_user_id) != request.user.id:
+            return Response({
+                "success": False,
+                "message": "This deposit reference does not belong to your account"
+            }, status=status.HTTP_403_FORBIDDEN)
+
         amount = Decimal(result['data']['amount']) / 100  # Convert from kobo
-
-        # Credit wallet and update platform financials (atomic)
-        with db_transaction.atomic():
-            profile = request.user.profile
-            balance_before = profile.wallet_balance
-            profile.wallet_balance += amount
-            profile.save()
-
-            # Log wallet transaction
-            WalletTransaction.objects.create(
-                user=request.user,
-                transaction_type='credit',
-                amount=amount,
-                source='deposit',
-                reference=reference,
-                balance_before=balance_before,
-                balance_after=profile.wallet_balance
-            )
-
-            # UPDATE FINANCIAL TRACKING: record deposit as user funds liability + paystack balance
-            from .models import PlatformFinancials, FinancialTransaction
-            financials = PlatformFinancials.get_instance()
-
-            # Wallet deposit is user money (liability) and increases Paystack balance
-            financials.user_funds_liability += amount
-            financials.paystack_balance += amount
-            financials.save()
-
-            # Audit log
-            FinancialTransaction.objects.create(
-                transaction_type='payment_received',
-                user_liability_change=amount,
-                paystack_balance_change=amount,
-                notes=f"Wallet deposit - User {request.user.id} (reference={reference})",
-                user_liability_after=financials.user_funds_liability,
-                platform_revenue_after=financials.platform_revenue,
-                paystack_balance_after=financials.paystack_balance,
-                created_by=request.user
-            )
+        ledger_result = FinancialLedgerService.record_wallet_deposit(request.user, amount, reference)
+        if ledger_result.get('duplicate'):
+            return Response({
+                "success": True,
+                "message": "Wallet deposit already processed",
+                "amount": str(ledger_result['amount']),
+                "new_balance": str(ledger_result['new_balance'])
+            })
 
         return Response({
             "success": True,
             "message": "Wallet credited successfully",
-            "amount": str(amount),
-            "new_balance": str(profile.wallet_balance)
+            "amount": str(ledger_result['amount']),
+            "new_balance": str(ledger_result['new_balance'])
         })
     else:
         return Response({

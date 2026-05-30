@@ -2,6 +2,8 @@
 ONE-TIME SETUP ENDPOINT FOR RENDER
 DELETE THIS FILE AFTER INITIAL SETUP!
 """
+from django.conf import settings
+from django.utils.crypto import get_random_string
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.contrib.auth.models import User
@@ -16,6 +18,11 @@ def initial_setup(request):
     
     ⚠️ DELETE THIS ENDPOINT AFTER USE! ⚠️
     """
+    if not settings.DEBUG:
+        return Response(
+            {"error": "Setup endpoint is disabled"},
+            status=404
+        )
     
     results = {
         "superuser": None,
@@ -25,14 +32,18 @@ def initial_setup(request):
     
     # Create superuser
     if not User.objects.filter(username='admin').exists():
+        admin_password = getattr(settings, 'INITIAL_SETUP_PASSWORD', '')
+        if not admin_password:
+            admin_password = get_random_string(20)
+
         User.objects.create_superuser(
             username='admin',
             email='admin@campusdeal.com',
-            password='CampusDeal2024!'  # CHANGE THIS IN ADMIN PANEL!
+            password=admin_password
         )
         results["superuser"] = {
             "username": "admin",
-            "password": "CampusDeal2024!",
+            "password": admin_password,
             "message": "⚠️ CHANGE PASSWORD IMMEDIATELY IN ADMIN PANEL!"
         }
     else:
