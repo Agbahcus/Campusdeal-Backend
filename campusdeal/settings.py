@@ -233,6 +233,10 @@ CORS_ALLOWED_ORIGINS = config(
     cast=Csv()
 )
 
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r'^https://.*\.netlify\.app$',
+]
+
 CORS_ALLOW_CREDENTIALS = True
 
 # SMS Configuration (Sendchamp for Nigeria)
