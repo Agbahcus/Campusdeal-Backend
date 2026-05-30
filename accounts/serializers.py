@@ -55,7 +55,7 @@ class UserRegistrationSerializer(serializers.Serializer):
     phone_number = serializers.CharField(max_length=20)
     password = serializers.CharField(write_only=True, min_length=8)
     primary_location = serializers.ChoiceField(
-        choices=['ilorin', 'malete', 'offa']
+        choices=['ilorin', 'malete', 'offa', 'lagos', 'abuja', 'ibadan', 'kano', 'port-harcourt']
     )
     user_type = serializers.ChoiceField(
         choices=['student', 'landlord'],

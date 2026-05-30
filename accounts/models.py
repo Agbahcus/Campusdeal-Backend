@@ -34,6 +34,11 @@ class Profile(models.Model):
         ('ilorin', 'Ilorin'),
         ('malete', 'Malete'),
         ('offa', 'Offa'),
+        ('lagos', 'Lagos'),
+        ('abuja', 'Abuja'),
+        ('ibadan', 'Ibadan'),
+        ('kano', 'Kano'),
+        ('port-harcourt', 'Port Harcourt'),
     ]
     primary_location = models.CharField(max_length=20, choices=LOCATION_CHOICES)
     
