@@ -17,6 +17,13 @@ class SendchampService:
         self.secret_key = getattr(settings, 'SENDCHAMP_SECRET_KEY', '')
         self.sender_id = getattr(settings, 'SENDCHAMP_SENDER_ID', 'Sendchamp')
         self.base_url = getattr(settings, 'SENDCHAMP_BASE_URL', 'https://api.sendchamp.com/api/v1')
+
+    @staticmethod
+    def _normalize_phone_number(phone_number):
+        normalized = str(phone_number).strip()
+        if normalized.startswith('+'):
+            normalized = normalized[1:]
+        return normalized
     
     def send_sms(self, phone_number, message):
         """
@@ -29,6 +36,12 @@ class SendchampService:
         Returns:
             dict: {'success': bool, 'data': dict} or {'success': bool, 'error': str}
         """
+        if not self.secret_key:
+            return {
+                'success': False,
+                'error': 'Sendchamp credentials not configured (SENDCHAMP_SECRET_KEY)',
+            }
+
         url = f'{self.base_url}/sms/send'
         
         headers = {
@@ -37,7 +50,7 @@ class SendchampService:
         }
         
         payload = {
-            'to': phone_number,
+            'to': self._normalize_phone_number(phone_number),
             'sender_name': self.sender_id,
             'message': message,
             'route': 'non_dnd'

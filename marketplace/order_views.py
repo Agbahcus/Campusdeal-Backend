@@ -26,10 +26,19 @@ from .order_serializers import (
     PaymentInitializationSerializer
 )
 from .payment_service import paystack_service
+from .ledger_service import FinancialLedgerService
 from accounts.models import Profile
 
 
 # ============ ORDER MANAGEMENT ============
+
+
+def _can_update_order_status(user, order, new_status):
+    if new_status in ['seller_preparing', 'with_courier', 'delivered']:
+        return order.seller == user
+    if new_status == 'cancelled':
+        return user in [order.buyer, order.seller]
+    return False
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -93,6 +102,12 @@ def initiate_order(request):
             # Get buyer
             from django.contrib.auth.models import User
             buyer = get_object_or_404(User, id=buyer_id)
+
+            if buyer == seller:
+                return Response(
+                    {"error": "Buyer and seller cannot be the same user"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             
             # Calculate fees
             item_price = item.price
@@ -212,6 +227,12 @@ def checkout_order(request, order_id):
 
 def process_wallet_payment(order, buyer):
     """Process payment using wallet balance with race condition protection"""
+
+    if order.status != 'payment_pending':
+        return Response(
+            {"error": "Order is not awaiting payment"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     
     try:
         with db_transaction.atomic():
@@ -263,33 +284,8 @@ def process_wallet_payment(order, buyer):
                 to_status='paid',
                 changed_by=buyer
             )
-            
-            # UPDATE FINANCIAL TRACKING ⭐ NEW
-            from .models import PlatformFinancials, FinancialTransaction
-            financials = PlatformFinancials.get_instance()
-            
-            # Item price = liability (owed to seller)
-            financials.user_funds_liability += order.item_price
-            
-            # Service fee = revenue (platform profit)
-            financials.platform_revenue += order.service_fee
-            
-            # Total in Paystack (wallet payments don't go to Paystack immediately)
-            # We'll handle this when user deposits to wallet
-            financials.save()
-            
-            # Log transaction
-            FinancialTransaction.objects.create(
-                transaction_type='payment_received',
-                user_liability_change=order.item_price,
-                platform_revenue_change=order.service_fee,
-                paystack_balance_change=0,  # Wallet payment, no Paystack change yet
-                related_order=order,
-                notes=f"Wallet payment - {order.order_id}",
-                user_liability_after=financials.user_funds_liability,
-                platform_revenue_after=financials.platform_revenue,
-                paystack_balance_after=financials.paystack_balance
-            )
+
+            FinancialLedgerService.record_order_payment(order=order, payment_method='wallet', created_by=buyer)
         
         return Response({
             "success": True,
@@ -313,6 +309,12 @@ def process_wallet_payment(order, buyer):
 
 def initialize_paystack_payment(order, buyer):
     """Initialize payment with Paystack"""
+
+    if order.status != 'payment_pending':
+        return Response(
+            {"error": "Order is not awaiting payment"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     
     # Generate unique reference
     reference = f"{order.order_id}_{int(timezone.now().timestamp())}"
@@ -381,13 +383,44 @@ def verify_payment(request):
     
     # Get order
     order = get_object_or_404(Order, paystack_reference=reference)
-    
+
+    if request.user != order.buyer and not request.user.is_staff:
+        return Response(
+            {"error": "You don't have permission to verify this payment"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    if order.status == 'paid' and order.funds_held:
+        return Response({
+            "success": True,
+            "order_id": order.order_id,
+            "status": "paid",
+            "message": "Payment already verified"
+        })
+
     # Verify with Paystack
     result = paystack_service.verify_payment(reference)
-    
+
     if result.get('status') and result['data']['status'] == 'success':
+        metadata = result['data'].get('metadata') or {}
+        verified_buyer_id = metadata.get('buyer_id')
+        if verified_buyer_id and int(verified_buyer_id) != request.user.id:
+            return Response(
+                {"error": "Payment reference does not belong to this user"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         # Payment successful
         with db_transaction.atomic():
+            order.refresh_from_db()
+            if order.status == 'paid' and order.funds_held:
+                return Response({
+                    "success": True,
+                    "order_id": order.order_id,
+                    "status": "paid",
+                    "message": "Payment already verified"
+                })
+
             order.status = 'paid'
             order.funds_held = True
             order.payment_method = 'paystack'
@@ -401,6 +434,8 @@ def verify_payment(request):
                 to_status='paid',
                 changed_by=request.user
             )
+
+            FinancialLedgerService.record_order_payment(order=order, payment_method='paystack', created_by=request.user)
         
         # TODO: Send notification to seller
         
@@ -438,15 +473,22 @@ def paystack_webhook(request):
     # Process event
     event = request.data.get('event')
     data = request.data.get('data')
-    
+
     if event == 'charge.success':
         # Payment successful
         reference = data['reference']
-        
+
         try:
             order = Order.objects.get(paystack_reference=reference)
+
+            if order.status == 'paid' and order.funds_held:
+                return Response({"status": "success"})
             
             with db_transaction.atomic():
+                order.refresh_from_db()
+                if order.status == 'paid' and order.funds_held:
+                    return Response({"status": "success"})
+
                 order.status = 'paid'
                 order.funds_held = True
                 order.payment_method = 'paystack'
@@ -459,34 +501,9 @@ def paystack_webhook(request):
                     from_status='payment_pending',
                     to_status='paid'
                 )
+
+                FinancialLedgerService.record_order_payment(order=order, payment_method='paystack', created_by=None)
                 
-                # UPDATE FINANCIAL TRACKING ⭐ NEW
-                from .models import PlatformFinancials, FinancialTransaction
-                financials = PlatformFinancials.get_instance()
-                
-                # Item price = liability (owed to seller)
-                financials.user_funds_liability += order.item_price
-                
-                # Service fee = revenue (platform profit)
-                financials.platform_revenue += order.service_fee
-                
-                # Total in Paystack
-                financials.paystack_balance += order.total_amount
-                financials.save()
-                
-                # Log transaction
-                FinancialTransaction.objects.create(
-                    transaction_type='payment_received',
-                    user_liability_change=order.item_price,
-                    platform_revenue_change=order.service_fee,
-                    paystack_balance_change=order.total_amount,
-                    related_order=order,
-                    notes=f"Order payment - {order.order_id}",
-                    user_liability_after=financials.user_funds_liability,
-                    platform_revenue_after=financials.platform_revenue,
-                    paystack_balance_after=financials.paystack_balance
-                )
-            
             # TODO: Send notification to seller
             
         except Order.DoesNotExist:
@@ -508,6 +525,12 @@ def list_orders(request):
     """
     user = request.user
     role = request.query_params.get('role', 'buyer')
+
+    if role not in ['buyer', 'seller']:
+        return Response(
+            {"error": "Invalid role. Must be buyer or seller."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     
     if role == 'buyer':
         orders = Order.objects.filter(buyer=user)
@@ -571,12 +594,19 @@ def update_order_status(request, order_id):
     notes = serializer.validated_data.get('notes', '')
     
     # Validate user can update status
-    if new_status in ['seller_preparing', 'with_courier']:
-        if order.seller != request.user:
-            return Response(
-                {"error": "Only seller can update to this status"},
-                status=status.HTTP_403_FORBIDDEN
-            )
+    if not _can_update_order_status(request.user, order, new_status):
+        return Response(
+            {"error": "You don't have permission to set this status"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    if order.status == new_status:
+        return Response({
+            "success": True,
+            "order_id": order.order_id,
+            "status": new_status,
+            "message": f"Order already in {new_status} status"
+        })
     
     # Update order
     old_status = order.status
@@ -710,12 +740,11 @@ def cancel_order(request, order_id):
         old_status = order.status
         
         if order.status == 'paid' and order.funds_held:
-            profile = Profile.objects.select_for_update().get(user=order.buyer)
-            balance_before = profile.wallet_balance
-            Profile.objects.filter(user=order.buyer).update(wallet_balance=F('wallet_balance') + order.total_amount)
-            profile.refresh_from_db()
-            
-            WalletTransaction.objects.create(user=order.buyer, transaction_type='credit', amount=order.total_amount, source='refund', related_order=order, balance_before=balance_before, balance_after=profile.wallet_balance)
+            FinancialLedgerService.process_order_refund(
+                order=order,
+                created_by=request.user,
+                source='refund',
+            )
         
         order.status = 'cancelled'
         order.save()

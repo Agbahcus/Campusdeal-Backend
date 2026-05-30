@@ -7,6 +7,7 @@ from django.db import transaction as db_transaction
 from django.utils import timezone
 from decimal import Decimal
 
+from .ledger_service import FinancialLedgerService
 from .models import Order, RefundRequest, WalletTransaction
 from marketplace.serializers import WalletTransactionSerializer
 from rest_framework import serializers
@@ -185,41 +186,12 @@ def approve_refund(request, refund_id):
     # Process refund
     with db_transaction.atomic():
         order = refund.order
-        
-        # Refund to buyer's wallet
-        buyer_profile = order.buyer.profile
-        balance_before = buyer_profile.wallet_balance
-        buyer_profile.wallet_balance += order.total_amount
-        buyer_profile.save()
-        
-        # Log transaction
-        WalletTransaction.objects.create(
-            user=order.buyer,
-            transaction_type='credit',
-            amount=order.total_amount,
+
+        FinancialLedgerService.process_order_refund(
+            order=order,
+            created_by=request.user,
             source='refund',
-            related_order=order,
-            balance_before=balance_before,
-            balance_after=buyer_profile.wallet_balance
         )
-        
-        # Deduct from seller's wallet if funds were released
-        if order.funds_released_to_seller:
-            seller_profile = order.seller.profile
-            seller_balance_before = seller_profile.wallet_balance
-            seller_profile.wallet_balance -= order.item_price
-            seller_profile.save()
-            
-            # Log seller transaction
-            WalletTransaction.objects.create(
-                user=order.seller,
-                transaction_type='debit',
-                amount=order.item_price,
-                source='refund',
-                related_order=order,
-                balance_before=seller_balance_before,
-                balance_after=seller_profile.wallet_balance
-            )
         
         # Update refund status
         refund.status = 'approved'
