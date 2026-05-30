@@ -13,8 +13,11 @@ class SendchampService:
     """Service class for Sendchamp SMS API"""
     
     def __init__(self):
-        self.public_key = getattr(settings, 'SENDCHAMP_PUBLIC_KEY', '')
-        self.secret_key = getattr(settings, 'SENDCHAMP_SECRET_KEY', '')
+        self.access_key = (
+            getattr(settings, 'SENDCHAMP_ACCESS_KEY', '')
+            or getattr(settings, 'SENDCHAMP_PUBLIC_KEY', '')
+            or getattr(settings, 'SENDCHAMP_SECRET_KEY', '')
+        )
         self.sender_id = getattr(settings, 'SENDCHAMP_SENDER_ID', 'Sendchamp')
         self.base_url = getattr(settings, 'SENDCHAMP_BASE_URL', 'https://api.sendchamp.com/api/v1')
 
@@ -36,16 +39,16 @@ class SendchampService:
         Returns:
             dict: {'success': bool, 'data': dict} or {'success': bool, 'error': str}
         """
-        if not self.secret_key:
+        if not self.access_key:
             return {
                 'success': False,
-                'error': 'Sendchamp credentials not configured (SENDCHAMP_SECRET_KEY)',
+                'error': 'Sendchamp credentials not configured (SENDCHAMP_ACCESS_KEY / SENDCHAMP_PUBLIC_KEY)',
             }
 
         url = f'{self.base_url}/sms/send'
         
         headers = {
-            'Authorization': f'Bearer {self.secret_key}',
+            'Authorization': f'Bearer {self.access_key}',
             'Content-Type': 'application/json'
         }
         

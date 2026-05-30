@@ -99,7 +99,7 @@ class AccountsFlowTests(APITestCase):
         sms_service = get_sms_service()
         self.assertEqual(sms_service.__class__.__name__, 'SendchampService')
 
-    @override_settings(SENDCHAMP_SECRET_KEY='sendchamp-secret', SENDCHAMP_SENDER_ID='CampusDeal')
+    @override_settings(SENDCHAMP_ACCESS_KEY='sendchamp-access', SENDCHAMP_SENDER_ID='CampusDeal')
     @patch('accounts.sendchamp_service.requests.post')
     def test_sendchamp_sms_uses_expected_endpoint(self, mock_post):
         mock_post.return_value.raise_for_status.return_value = None

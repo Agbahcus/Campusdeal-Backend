@@ -238,6 +238,7 @@ CORS_ALLOW_CREDENTIALS = True
 # SMS Configuration (Sendchamp for Nigeria)
 SMS_PROVIDER = config('SMS_PROVIDER', default='sendchamp')
 
+SENDCHAMP_ACCESS_KEY = config('SENDCHAMP_ACCESS_KEY', default='')
 SENDCHAMP_PUBLIC_KEY = config('SENDCHAMP_PUBLIC_KEY', default='')
 SENDCHAMP_SECRET_KEY = config('SENDCHAMP_SECRET_KEY', default='')
 SENDCHAMP_SENDER_ID = config('SENDCHAMP_SENDER_ID', default='Sendchamp')
