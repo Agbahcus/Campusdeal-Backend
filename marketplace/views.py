@@ -23,6 +23,30 @@ class StandardResultsSetPagination(PageNumberPagination):
     max_page_size = 100
 
 
+DEFAULT_CATEGORIES = [
+    {"name": "Electronics", "icon": "phone"},
+    {"name": "Books", "icon": "book"},
+    {"name": "Clothing", "icon": "shirt"},
+    {"name": "Furniture", "icon": "chair"},
+    {"name": "Phones", "icon": "smartphone"},
+    {"name": "Laptops", "icon": "laptop"},
+    {"name": "Accessories", "icon": "bag"},
+    {"name": "Household", "icon": "home"},
+    {"name": "Other", "icon": "dots"},
+]
+
+
+def _seed_default_categories():
+    if ItemCategory.objects.exists():
+        return
+
+    for category_data in DEFAULT_CATEGORIES:
+        ItemCategory.objects.get_or_create(
+            name=category_data["name"],
+            defaults={"icon": category_data["icon"]},
+        )
+
+
 # ============ ITEM CATEGORIES ============
 
 @api_view(['GET'])
@@ -33,6 +57,7 @@ def list_categories(request):
     
     GET /api/marketplace/categories/
     """
+    _seed_default_categories()
     categories = ItemCategory.objects.filter(is_active=True)
     serializer = ItemCategorySerializer(categories, many=True)
     return Response(serializer.data)
