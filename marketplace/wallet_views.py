@@ -4,13 +4,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.db import transaction as db_transaction
-from django.utils import timezone
 from decimal import Decimal
 
 from .models import WalletTransaction
 from .serializers import WalletTransactionSerializer
 from .payment_service import paystack_service
 from .ledger_service import FinancialLedgerService
+from .idempotency import build_reference, get_request_id
 
 
 class WalletPagination(PageNumberPagination):
@@ -105,8 +105,11 @@ def add_funds_to_wallet(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Generate reference
-    reference = f"WALLET_{request.user.id}_{int(timezone.now().timestamp())}"
+    request_id = get_request_id(
+        request,
+        fallback=f'wallet-deposit-{request.user.id}-{amount_str}',
+    )
+    reference = build_reference('WALLET', request.user.id, amount, request.user.email, request_id)
     
     # Initialize Paystack payment
     from django.conf import settings
@@ -187,30 +190,6 @@ def verify_wallet_deposit(request):
             "success": False,
             "message": "Payment verification failed"
         }, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def request_withdrawal(request):
-    """
-    Request withdrawal from wallet to bank account
-    
-    POST /api/marketplace/wallet/withdraw/
-    Body: {
-        "amount": "10000.00",
-        "account_number": "0123456789",
-        "bank_code": "058"  // Paystack bank code
-    }
-    """
-    # TODO: Implement withdrawal logic
-    # This requires:
-    # 1. Creating transfer recipient with Paystack
-    # 2. Initiating transfer
-    # 3. Deducting from wallet on success
-    
-    return Response({
-        "message": "Withdrawal feature coming soon"
-    }, status=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @api_view(['GET'])

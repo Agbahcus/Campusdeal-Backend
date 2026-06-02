@@ -35,12 +35,21 @@ ALLOWED_HOSTS = config(
 )
 
 # Rate Limiting & Caching
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'unique-snowflake',
+REDIS_URL_SETTING = os.environ.get('REDIS_URL', '')
+if REDIS_URL_SETTING:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL_SETTING,
+        }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'unique-snowflake',
+        }
+    }
 
 RATELIMIT_ENABLE = True
 RATELIMIT_USE_CACHE = 'default'
@@ -69,6 +78,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'channels',
     *OPTIONAL_APPS,
 
     # Local apps
@@ -122,6 +132,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'campusdeal.wsgi.application'
+ASGI_APPLICATION = 'campusdeal.asgi.application'
 
 # Database
 # Automatically uses Railway's DATABASE_URL in production
@@ -149,6 +160,24 @@ else:
                 'timeout': 20,
             }
         }
+    }
+
+# Channels / websocket layer
+REDIS_URL = config('REDIS_URL', default='')
+if REDIS_URL:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': [REDIS_URL],
+            },
+        },
+    }
+else:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
     }
 
 # Password validation
@@ -281,6 +310,7 @@ EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@campusdeal.com')
+FINANCE_ALERT_EMAILS = [email.strip() for email in config('FINANCE_ALERT_EMAILS', default='').split(',') if email.strip()]
 
 # Production Security Settings
 if not DEBUG:

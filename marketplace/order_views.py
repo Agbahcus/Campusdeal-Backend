@@ -27,6 +27,13 @@ from .order_serializers import (
 )
 from .payment_service import paystack_service
 from .ledger_service import FinancialLedgerService
+from .idempotency import build_reference, get_request_id
+from .background_jobs import (
+    refresh_financial_reconciliation_snapshot,
+    run_after_commit,
+    send_finance_alert,
+    send_user_sms_notification,
+)
 from accounts.models import Profile
 
 
@@ -39,6 +46,7 @@ def _can_update_order_status(user, order, new_status):
     if new_status == 'cancelled':
         return user in [order.buyer, order.seller]
     return False
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -207,6 +215,7 @@ def checkout_order(request, order_id):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
     payment_method = serializer.validated_data['payment_method']
+    idempotency_key = get_request_id(request, fallback='checkout')
     
     # Update delivery details if applicable
     if order.delivery_method in ['campusdeal', 'seller']:
@@ -217,7 +226,7 @@ def checkout_order(request, order_id):
     if payment_method == 'wallet':
         return process_wallet_payment(order, buyer)
     elif payment_method == 'paystack':
-        return initialize_paystack_payment(order, buyer)
+        return initialize_paystack_payment(order, buyer, idempotency_key=idempotency_key)
     else:
         return Response(
             {"error": "Invalid payment method"},
@@ -307,7 +316,7 @@ def process_wallet_payment(order, buyer):
         )
 
 
-def initialize_paystack_payment(order, buyer):
+def initialize_paystack_payment(order, buyer, idempotency_key='checkout'):
     """Initialize payment with Paystack"""
 
     if order.status != 'payment_pending':
@@ -315,9 +324,16 @@ def initialize_paystack_payment(order, buyer):
             {"error": "Order is not awaiting payment"},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
-    # Generate unique reference
-    reference = f"{order.order_id}_{int(timezone.now().timestamp())}"
+
+    if order.paystack_reference and order.paystack_access_code:
+        return Response({
+            "authorization_url": f"https://checkout.paystack.com/{order.paystack_access_code}",
+            "access_code": order.paystack_access_code,
+            "reference": order.paystack_reference,
+            "message": "Existing payment session reused"
+        })
+
+    reference = build_reference('PAY', order.order_id, buyer.id, 'paystack', idempotency_key)
     
     # Callback URL (frontend will handle this)
     callback_url = f"{settings.FRONTEND_URL}/payment/verify"
@@ -412,7 +428,7 @@ def verify_payment(request):
 
         # Payment successful
         with db_transaction.atomic():
-            order.refresh_from_db()
+            order = Order.objects.select_for_update().get(pk=order.pk)
             if order.status == 'paid' and order.funds_held:
                 return Response({
                     "success": True,
@@ -421,23 +437,34 @@ def verify_payment(request):
                     "message": "Payment already verified"
                 })
 
+            old_status = order.status
             order.status = 'paid'
             order.funds_held = True
             order.payment_method = 'paystack'
             order.paid_at = timezone.now()
             order.save()
-            
-            # Log status change
+
             OrderStatusHistory.objects.create(
                 order=order,
-                from_status='payment_pending',
+                from_status=old_status,
                 to_status='paid',
                 changed_by=request.user
             )
 
             FinancialLedgerService.record_order_payment(order=order, payment_method='paystack', created_by=request.user)
-        
-        # TODO: Send notification to seller
+
+            seller_message = (
+                f"CampusDeal payment received for order {order.order_id}. "
+                f"Buyer payment is now secured."
+            )
+            buyer_message = (
+                f"CampusDeal payment verified for order {order.order_id}. "
+                f"Your payment is now secured."
+            )
+
+            run_after_commit('order-payment-seller-notify', send_user_sms_notification, order.seller, seller_message)
+            run_after_commit('order-payment-buyer-notify', send_user_sms_notification, order.buyer, buyer_message)
+            run_after_commit('order-payment-reconcile', refresh_financial_reconciliation_snapshot, f'paystack payment {order.order_id}')
         
         return Response({
             "success": True,
@@ -446,6 +473,10 @@ def verify_payment(request):
             "message": "Payment verified successfully"
         })
     else:
+        send_finance_alert(
+            subject='CampusDeal payment verification failed',
+            message=f"Reference: {reference}\nUser: {request.user.id}\nPaystack response: {result.get('message') or result.get('error')}",
+        )
         return Response({
             "success": False,
             "message": "Payment verification failed"
@@ -465,6 +496,10 @@ def paystack_webhook(request):
     paystack_signature = request.headers.get('x-paystack-signature')
     
     if not paystack_service.verify_webhook_signature(request.body, paystack_signature):
+        send_finance_alert(
+            subject='CampusDeal webhook signature rejected',
+            message='Received Paystack webhook with invalid signature.',
+        )
         return Response(
             {"error": "Invalid signature"},
             status=status.HTTP_400_BAD_REQUEST
@@ -479,35 +514,48 @@ def paystack_webhook(request):
         reference = data['reference']
 
         try:
-            order = Order.objects.get(paystack_reference=reference)
-
-            if order.status == 'paid' and order.funds_held:
-                return Response({"status": "success"})
-            
             with db_transaction.atomic():
-                order.refresh_from_db()
+                order = Order.objects.select_for_update().get(paystack_reference=reference)
+
                 if order.status == 'paid' and order.funds_held:
                     return Response({"status": "success"})
 
+                old_status = order.status
                 order.status = 'paid'
                 order.funds_held = True
                 order.payment_method = 'paystack'
                 order.paid_at = timezone.now()
                 order.save()
-                
-                # Log status change
+
                 OrderStatusHistory.objects.create(
                     order=order,
-                    from_status='payment_pending',
+                    from_status=old_status,
                     to_status='paid'
                 )
 
                 FinancialLedgerService.record_order_payment(order=order, payment_method='paystack', created_by=None)
-                
-            # TODO: Send notification to seller
+
+                seller_message = (
+                    f"CampusDeal payment received for order {order.order_id}. "
+                    f"Your buyer payment is now secured."
+                )
+                buyer_message = (
+                    f"CampusDeal payment verified for order {order.order_id}."
+                )
+                run_after_commit('webhook-order-payment-seller-notify', send_user_sms_notification, order.seller, seller_message)
+                run_after_commit('webhook-order-payment-buyer-notify', send_user_sms_notification, order.buyer, buyer_message)
+                run_after_commit('webhook-order-payment-reconcile', refresh_financial_reconciliation_snapshot, f'webhook payment {order.order_id}')
             
         except Order.DoesNotExist:
-            pass
+            send_finance_alert(
+                subject='CampusDeal webhook unknown reference',
+                message=f"Received Paystack charge.success for unknown reference: {reference}",
+            )
+        except Exception as exc:
+            send_finance_alert(
+                subject='CampusDeal webhook processing failed',
+                message=f"Reference: {reference}\nError: {exc}",
+            )
     
     return Response({"status": "success"})
 

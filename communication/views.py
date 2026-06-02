@@ -9,6 +9,7 @@ from django.db.models import Q
 from django.contrib.auth.models import User
 
 from .models import Chat, Message, ModeratedMessageLog
+from .content_moderator import moderator
 from .serializers import (
     ChatSerializer,
     ChatListSerializer,
@@ -17,8 +18,8 @@ from .serializers import (
     CreateChatSerializer,
     ModeratedMessageLogSerializer
 )
-from .content_moderator import moderator
 from marketplace.models import ItemListing
+from .services import process_chat_message, mark_chat_messages_read
 
 
 class MessagePagination(PageNumberPagination):
@@ -131,26 +132,13 @@ def create_chat(request):
     
     # Send initial message if provided
     if initial_message:
-        # Scan for violations
-        scan_result = moderator.scan_message(initial_message)
-        
-        if scan_result['is_clean']:
-            # Create message
-            message = Message.objects.create(
-                chat=chat,
-                sender=user,
-                text=initial_message
-            )
-            
-            # Update chat last message
-            chat.last_message = initial_message
-            chat.save()
-        else:
+        message_result = process_chat_message(chat, user, initial_message)
+        if not message_result['success']:
             # Message violates policy - return error
             return Response({
                 "error": "Message violates policy",
-                "warning": scan_result['warning_message'],
-                "flags": scan_result['flags']
+                "warning": message_result['warning'],
+                "flags": message_result['flags']
             }, status=status.HTTP_400_BAD_REQUEST)
     
     serializer = ChatSerializer(chat, context={'request': request})
@@ -264,75 +252,22 @@ def send_message(request, chat_id):
     
     message_text = serializer.validated_data['text']
     
-    # Scan message for violations
-    scan_result = moderator.scan_message(message_text)
-    
-    if scan_result['is_clean']:
-        # Message is clean - save and deliver
-        with db_transaction.atomic():
-            message = Message.objects.create(
-                chat=chat,
-                sender=sender,
-                text=message_text
-            )
-            
-            # Update chat last message
-            chat.last_message = message_text[:100]  # Truncate for preview
-            chat.save()
-        
-        # TODO: Send push notification to recipient
-        
+    message_result = process_chat_message(chat, sender, message_text)
+
+    if message_result['success']:
         return Response(
-            MessageSerializer(message, context={'request': request}).data,
+            MessageSerializer(message_result['message'], context={'request': request}).data,
             status=status.HTTP_201_CREATED
         )
-    
-    else:
-        # Message violates policy - handle strike system
-        with db_transaction.atomic():
-            profile = sender.profile
-            
-            # Increment strikes
-            profile.chat_strikes += 1
-            current_strike = profile.chat_strikes
-            
-            # Log violation
-            ModeratedMessageLog.objects.create(
-                original_sender=sender,
-                chat=chat,
-                original_text=message_text,
-                detected_flags=', '.join(scan_result['flags']),
-                action_taken='deleted',
-                strike_number=current_strike
-            )
-            
-            # Generate warning message
-            warning_text = scan_result['warning_message']
-            strike_message = moderator.get_strike_message(current_strike)
-            
-            # Check if should suspend
-            if current_strike >= 3:
-                profile.is_suspended = True
-                profile.suspension_reason = "3 chat policy violations - sharing contact information"
-            
-            profile.save()
-            
-            # Send system warning to chat
-            Message.objects.create(
-                chat=chat,
-                sender=sender,
-                text=f"{warning_text}\n\n{strike_message}",
-                is_system_warning=True
-            )
-        
-        return Response({
-            "error": "Message blocked",
-            "warning": warning_text,
-            "strike_number": current_strike,
-            "strikes_remaining": max(0, 3 - current_strike),
-            "account_suspended": current_strike >= 3,
-            "flags": scan_result['flags']
-        }, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({
+        "error": "Message blocked",
+        "warning": message_result['warning'],
+        "strike_number": message_result['strike_number'],
+        "strikes_remaining": message_result['strikes_remaining'],
+        "account_suspended": message_result['account_suspended'],
+        "flags": message_result['flags']
+    }, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['PATCH'])
@@ -352,12 +287,7 @@ def mark_messages_read(request, chat_id):
             status=status.HTTP_403_FORBIDDEN
         )
     
-    # Mark all messages from other user as read
-    updated = chat.messages.filter(
-        is_read=False
-    ).exclude(
-        sender=request.user
-    ).update(is_read=True)
+    updated = mark_chat_messages_read(chat, request.user)
     
     return Response({
         "success": True,
@@ -401,7 +331,6 @@ def get_moderation_logs(request):
     
     GET /api/chats/moderation-logs/
     """
-    # TODO: Add admin permission check
     if not request.user.is_staff:
         return Response(
             {"error": "Admin access required"},
