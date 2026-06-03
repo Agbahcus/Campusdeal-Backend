@@ -5,6 +5,7 @@ Handles phone verification and notifications via Sendchamp API
 import requests
 from django.conf import settings
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ class SendchampService:
         normalized = str(phone_number).strip()
         if normalized.startswith('+'):
             normalized = normalized[1:]
+        if normalized.startswith('0') and len(normalized) == 11 and normalized.isdigit():
+            normalized = f"234{normalized[1:]}"
         return normalized
     
     def send_sms(self, phone_number, message):
@@ -56,7 +59,7 @@ class SendchampService:
             'to': self._normalize_phone_number(phone_number),
             'sender_name': self.sender_id,
             'message': message,
-            'route': 'non_dnd'
+            'route': getattr(settings, 'SENDCHAMP_ROUTE', os.environ.get('SENDCHAMP_ROUTE', 'non_dnd'))
         }
         
         try:
@@ -68,7 +71,8 @@ class SendchampService:
             return {'success': True, 'data': data}
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to send SMS to {phone_number}: {str(e)}")
+            response_text = getattr(getattr(e, 'response', None), 'text', '')
+            logger.error(f"Failed to send SMS to {phone_number}: {str(e)} | response={response_text}")
             return {'success': False, 'error': str(e)}
     
     def send_verification_code(self, phone_number, code):
