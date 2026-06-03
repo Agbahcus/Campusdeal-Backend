@@ -47,9 +47,19 @@ class ItemListingSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         """Validate that at least one delivery option is selected"""
-        allow_campusdeal = data.get('allow_campusdeal_delivery', False)
-        allow_seller = data.get('allow_seller_delivery', False)
-        allow_pickup = data.get('allow_pickup', False)
+        instance = getattr(self, 'instance', None)
+        allow_campusdeal = data.get(
+            'allow_campusdeal_delivery',
+            getattr(instance, 'allow_campusdeal_delivery', False) if instance else False,
+        )
+        allow_seller = data.get(
+            'allow_seller_delivery',
+            getattr(instance, 'allow_seller_delivery', False) if instance else False,
+        )
+        allow_pickup = data.get(
+            'allow_pickup',
+            getattr(instance, 'allow_pickup', False) if instance else False,
+        )
         
         if not (allow_campusdeal or allow_seller or allow_pickup):
             raise serializers.ValidationError(

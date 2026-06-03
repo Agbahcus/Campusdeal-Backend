@@ -242,3 +242,59 @@ accounts/sendchamp_service.py
 You’re out of Codex messages
 Your rate limit resets on Jul 2, 2026, 11:05 PM. To continue using Codex and get access to GPT-5.3-Codex, start your free trial of Plus today.
 
+
+---
+Amazon Q Session — May 2026
+---
+
+Fixed backend deployment issues and implemented major new features.
+
+Fixes Applied
+
+1. CORS blocked on campusdealls.netlify.app — added Netlify origins to CORS_ALLOWED_ORIGINS in render.yaml and settings.py
+2. sys.exit(1) crashing the app on missing env vars — replaced with a warning log
+3. Migrations never ran on Render — added Pre-Deploy Command: python manage.py migrate in Render dashboard
+4. NameError: settings not defined in accounts/views.py — added missing from django.conf import settings import
+5. SMS timeout blocking registration — wrapped Sendchamp calls in try/except, reduced timeout from 30s to 5s
+6. SECURE_SSL_REDIRECT causing redirect loops on Render — set to False and added SECURE_PROXY_SSL_HEADER
+7. /api/accounts/auth/register/ 404 — fixed frontend API paths to match actual backend URL routing
+
+New Features Added
+
+1. FCM Push Notifications
+   - accounts/fcm_service.py — sends push to device tokens, saves Notification records
+   - DeviceToken model — stores FCM tokens per user device
+   - Notification model — in-app notification history with types and related_id
+   - POST /api/accounts/device-token/ — register FCM token after login
+   - GET /api/accounts/notifications/ — list notifications (?unread_only=true)
+   - PATCH /api/accounts/notifications/{id}/read/ — mark one read
+   - PATCH /api/accounts/notifications/read-all/ — mark all read
+   - FCM hooked into: new chat, new message, order created, payment received, order status change, delivery confirmed, offer events
+
+2. Offer / Negotiation Flow
+   - Offer model with fields: item, buyer, proposed_price, message, delivery_method, status, order (FK)
+   - POST /api/marketplace/listings/{id}/offer/ — buyer sends offer on negotiable item
+   - POST /api/marketplace/offers/{id}/respond/ — seller accepts or rejects (accept auto-creates order)
+   - GET /api/marketplace/offers/ — list offers (?role=buyer|seller, ?status=pending)
+   - GET /api/marketplace/listings/{id}/offers/ — seller views all offers on a listing
+   - On accept: order created at agreed price, other pending offers expired atomically, buyer notified via push
+
+3. Buyer-Initiated Order (non-negotiable items)
+   - POST /api/marketplace/orders/buy/ — buyer buys fixed-price item directly
+   - Only works when is_negotiable = false, returns 400 otherwise
+   - Seller notified via push on order creation
+
+4. Home Feed Endpoint
+   - GET /api/marketplace/feed/ — single call returns featured listings + categories + user stats + unread notifications
+   - Replaces 4 separate API calls on app launch
+   - Works for both authenticated and unauthenticated users
+
+5. API Documentation
+   - Full rewrite of API_DOCUMENTATION.md
+   - Added all new endpoints, flows, environment variables table, notification navigation guide, mobile developer notes
+
+Migrations created:
+  - accounts/migrations/0003 — DeviceToken and Notification models
+  - marketplace/migrations/0007 — Offer model
+
+Git commit: "feat: FCM push notifications, Offer model, home feed, notification center"

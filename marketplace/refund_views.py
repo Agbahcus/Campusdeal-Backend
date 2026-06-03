@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db import transaction as db_transaction
 from django.utils import timezone
+from django.core.exceptions import ValidationError
 
 from .ledger_service import FinancialLedgerService
 from .models import Order, RefundRequest
@@ -75,6 +76,7 @@ def request_refund(request, order_id):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    order = None
     try:
         with db_transaction.atomic():
             order = Order.objects.select_for_update().get(order_id=order_id)
@@ -134,6 +136,16 @@ def request_refund(request, order_id):
         return Response(
             RefundRequestSerializer(refund).data,
             status=status.HTTP_201_CREATED
+        )
+    except Order.DoesNotExist:
+        return Response(
+            {"error": "Order not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except ValidationError as exc:
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST
         )
     except Exception as exc:
         send_finance_alert(
@@ -261,6 +273,15 @@ def approve_refund(request, refund_id):
             {"error": "Refund request not found"},
             status=status.HTTP_404_NOT_FOUND
         )
+    except ValidationError as exc:
+        send_finance_alert(
+            'Refund approval validation failed',
+            f'Failed to approve refund {refund_id} by admin {request.user.id}: {exc}',
+        )
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     except Exception as exc:
         send_finance_alert(
             'Refund approval failed',
@@ -353,6 +374,15 @@ def reject_refund(request, refund_id):
         return Response(
             {"error": "Refund request not found"},
             status=status.HTTP_404_NOT_FOUND
+        )
+    except ValidationError as exc:
+        send_finance_alert(
+            'Refund rejection validation failed',
+            f'Failed to reject refund {refund_id} by admin {request.user.id}: {exc}',
+        )
+        return Response(
+            {"error": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST
         )
     except Exception as exc:
         send_finance_alert(

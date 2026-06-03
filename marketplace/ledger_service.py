@@ -1,5 +1,8 @@
 from decimal import Decimal
 
+from decimal import Decimal
+
+from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from accounts.models import Profile
@@ -73,16 +76,23 @@ class FinancialLedgerService:
     def record_order_payment(order, payment_method, created_by):
         with transaction.atomic():
             financials = PlatformFinancials.get_instance()
-            financials.user_funds_liability += order.item_price
-            financials.platform_revenue += order.service_fee
+            if payment_method == 'paystack':
+                user_liability_change = order.item_price
+                paystack_delta = order.total_amount
+            else:
+                # Wallet purchases already reduce the buyer's wallet balance in Profile.
+                # Only the platform's kept portion remains as revenue.
+                user_liability_change = -(order.service_fee + order.delivery_fee)
+                paystack_delta = Decimal('0')
 
-            paystack_delta = order.total_amount if payment_method == 'paystack' else Decimal('0')
+            financials.user_funds_liability += user_liability_change
+            financials.platform_revenue += order.service_fee
             financials.paystack_balance += paystack_delta
             financials.save()
 
             FinancialTransaction.objects.create(
                 transaction_type='payment_received',
-                user_liability_change=order.item_price,
+                user_liability_change=user_liability_change,
                 platform_revenue_change=order.service_fee,
                 paystack_balance_change=paystack_delta,
                 related_order=order,
@@ -97,16 +107,21 @@ class FinancialLedgerService:
     def reverse_order_payment(order, created_by, note='Order cancelled'):
         with transaction.atomic():
             financials = PlatformFinancials.get_instance()
-            financials.user_funds_liability -= order.item_price
-            financials.platform_revenue -= order.service_fee
+            if order.payment_method == 'paystack':
+                user_liability_change = -order.item_price
+                paystack_delta = -order.total_amount
+            else:
+                user_liability_change = order.service_fee + order.delivery_fee
+                paystack_delta = Decimal('0')
 
-            paystack_delta = -order.total_amount if order.payment_method == 'paystack' else Decimal('0')
+            financials.user_funds_liability += user_liability_change
+            financials.platform_revenue -= order.service_fee
             financials.paystack_balance += paystack_delta
             financials.save()
 
             FinancialTransaction.objects.create(
                 transaction_type='refund_issued',
-                user_liability_change=-order.item_price,
+                user_liability_change=user_liability_change,
                 platform_revenue_change=-order.service_fee,
                 paystack_balance_change=paystack_delta,
                 related_order=order,
@@ -140,6 +155,11 @@ class FinancialLedgerService:
             seller_profile = None
             if order.funds_released_to_seller:
                 seller_profile = Profile.objects.select_for_update().get(user=order.seller)
+                if seller_profile.wallet_balance < order.item_price:
+                    raise ValidationError(
+                        'Seller wallet balance is insufficient to reverse this refund. '
+                        'The seller may have already withdrawn the funds.'
+                    )
                 seller_balance_before = seller_profile.wallet_balance
                 Profile.objects.filter(user=order.seller).update(
                     wallet_balance=seller_profile.wallet_balance - order.item_price

@@ -10,6 +10,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.conf import settings
 from django.utils import timezone
+from django.db import transaction as db_transaction
 from django_ratelimit.decorators import ratelimit
 from datetime import timedelta
 import random
@@ -96,27 +97,27 @@ def register_user(request):
     first_name = name_parts[0]
     last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ''
     
-    # Create User
-    user = User.objects.create_user(
-        username=data['phone_number'],  # Use phone as username
-        email=data['email'],
-        password=data['password'],
-        first_name=first_name,
-        last_name=last_name
-    )
-    
-    # Generate 6-digit verification code
     verification_code = str(random.randint(100000, 999999))
-    
-    # Create Profile
-    profile = Profile.objects.create(
-        user=user,
-        phone_number=data['phone_number'],
-        primary_location=data['primary_location'],
-        user_type=data.get('user_type', 'student'),
-        verification_code=verification_code,
-        verification_code_created_at=timezone.now()
-    )
+
+    with db_transaction.atomic():
+        # Create the auth user and profile together so we never leave an orphaned account
+        user = User.objects.create_user(
+            username=data['phone_number'],  # Use phone as username
+            email=data['email'],
+            password=data['password'],
+            first_name=first_name,
+            last_name=last_name
+        )
+
+        # Generate 6-digit verification code
+        profile = Profile.objects.create(
+            user=user,
+            phone_number=data['phone_number'],
+            primary_location=data['primary_location'],
+            user_type=data.get('user_type', 'student'),
+            verification_code=verification_code,
+            verification_code_created_at=timezone.now()
+        )
     
     # TODO: Send SMS via Termii/Twilio
     # For now, we'll return the code in response (ONLY FOR DEVELOPMENT)
@@ -226,6 +227,7 @@ def verify_phone(request):
         )
 
 
+@ratelimit(key='ip', rate='5/h', method='POST')
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def resend_verification_code(request):
@@ -532,6 +534,7 @@ def logout_user(request):
         )
 
 
+@ratelimit(key='ip', rate='5/h', method='POST')
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def request_password_reset(request):
@@ -558,6 +561,7 @@ def request_password_reset(request):
         return Response({"error": "Phone number not registered"}, status=status.HTTP_404_NOT_FOUND)
 
 
+@ratelimit(key='ip', rate='10/h', method='POST')
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def confirm_password_reset(request):

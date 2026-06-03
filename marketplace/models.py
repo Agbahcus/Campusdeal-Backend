@@ -107,8 +107,10 @@ class ItemListing(models.Model):
     
     def increment_views(self):
         """Increment view count"""
-        self.views_count += 1
-        self.save(update_fields=['views_count'])
+        from django.db.models import F
+
+        ItemListing.objects.filter(pk=self.pk).update(views_count=F('views_count') + 1)
+        self.refresh_from_db(fields=['views_count'])
 
 
 class Order(models.Model):
@@ -162,7 +164,7 @@ class Order(models.Model):
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     
     # Payment Tracking
-    paystack_reference = models.CharField(max_length=100, blank=True, unique=True)
+    paystack_reference = models.CharField(max_length=100, blank=True, null=True, unique=True)
     paystack_access_code = models.CharField(max_length=100, blank=True)
     payment_method = models.CharField(max_length=20, blank=True)  # 'wallet' or 'paystack'
     
@@ -188,7 +190,7 @@ class Order(models.Model):
     # Escrow Management
     funds_held = models.BooleanField(default=False)  # True when payment received
     funds_released_to_seller = models.BooleanField(default=False)
-    payout_reference = models.CharField(max_length=100, blank=True)  # Paystack transfer ref
+    payout_reference = models.CharField(max_length=100, blank=True, null=True)  # Paystack transfer ref
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -205,6 +207,10 @@ class Order(models.Model):
         ]
     
     def save(self, *args, **kwargs):
+        if not self.paystack_reference:
+            self.paystack_reference = None
+        if not self.waybill_number:
+            self.waybill_number = None
         if not self.order_id:
             # Generate unique order ID
             self.order_id = f"CD{uuid.uuid4().hex[:12].upper()}"
@@ -458,8 +464,10 @@ class HostelListing(models.Model):
     
     def increment_views(self):
         """Increment view count"""
-        self.views_count += 1
-        self.save(update_fields=['views_count'])
+        from django.db.models import F
+
+        HostelListing.objects.filter(pk=self.pk).update(views_count=F('views_count') + 1)
+        self.refresh_from_db(fields=['views_count'])
 
 
 class Offer(models.Model):
@@ -508,7 +516,7 @@ class Withdrawal(models.Model):
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     withdrawal_fee = models.DecimalField(max_digits=10, decimal_places=2, default=25.00)
     net_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    transfer_code = models.CharField(max_length=100, unique=True, blank=True)
+    transfer_code = models.CharField(max_length=100, unique=True, blank=True, null=True)
     reference = models.CharField(max_length=100, unique=True)
     
     STATUS_CHOICES = [
@@ -535,6 +543,12 @@ class Withdrawal(models.Model):
     
     def __str__(self):
         return f"Withdrawal {self.reference} - ₦{self.amount} - {self.status}"
+
+
+    def save(self, *args, **kwargs):
+        if not self.transfer_code:
+            self.transfer_code = None
+        super().save(*args, **kwargs)
 
 
 class PlatformFinancials(models.Model):

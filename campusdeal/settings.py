@@ -26,7 +26,7 @@ def _parse_debug_flag(value, default=True):
     return default
 
 
-DEBUG = _parse_debug_flag(os.environ.get('DEBUG'), default=True)
+DEBUG = _parse_debug_flag(os.environ.get('DEBUG'), default=False)
 
 ALLOWED_HOSTS = config(
     'ALLOWED_HOSTS',
