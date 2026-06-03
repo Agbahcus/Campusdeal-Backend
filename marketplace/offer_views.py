@@ -162,8 +162,8 @@ def respond_to_offer(request, offer_id):
             offer.order = order
             offer.save()
 
-        # Expire all other pending offers on this item
-        Offer.objects.filter(item=offer.item, status='pending').exclude(id=offer.id).update(status='expired')
+            # Expire all other pending offers inside the transaction
+            Offer.objects.filter(item=offer.item, status='pending').exclude(id=offer.id).update(status='expired')
 
         run_after_commit(
             'offer-accept-notify',
