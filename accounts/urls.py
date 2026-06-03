@@ -18,4 +18,10 @@ urlpatterns = [
     # User Profile
     path('users/me/', views.user_profile, name='my-profile'),
     path('users/<int:user_id>/profile/', views.get_user_profile, name='user-profile'),
+
+    # Device tokens & Notifications
+    path('device-token/', views.register_device_token, name='register-device-token'),
+    path('notifications/', views.list_notifications, name='list-notifications'),
+    path('notifications/read-all/', views.mark_all_notifications_read, name='mark-all-read'),
+    path('notifications/<int:notification_id>/read/', views.mark_notification_read, name='mark-notification-read'),
 ]

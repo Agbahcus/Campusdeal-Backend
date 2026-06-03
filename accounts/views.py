@@ -377,6 +377,95 @@ def user_profile(request):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def register_device_token(request):
+    """
+    Register FCM device token for push notifications
+
+    POST /api/accounts/device-token/
+    Body: {"token": "fcm_token_here", "platform": "android"}
+    """
+    from .models import DeviceToken
+    token = request.data.get('token', '').strip()
+    platform = request.data.get('platform', 'android')
+
+    if not token:
+        return Response({'error': 'token is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if platform not in ['android', 'ios']:
+        return Response({'error': 'platform must be android or ios'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Update or create — token may move between users on shared devices
+    DeviceToken.objects.filter(token=token).exclude(user=request.user).delete()
+    DeviceToken.objects.update_or_create(
+        token=token,
+        defaults={'user': request.user, 'platform': platform, 'is_active': True}
+    )
+    return Response({'message': 'Device token registered'}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_notifications(request):
+    """
+    Get user's notifications
+
+    GET /api/accounts/notifications/
+    Query params: ?unread_only=true
+    """
+    from .models import Notification
+    from rest_framework.pagination import PageNumberPagination
+
+    qs = Notification.objects.filter(user=request.user)
+    if request.query_params.get('unread_only') == 'true':
+        qs = qs.filter(is_read=False)
+
+    paginator = PageNumberPagination()
+    paginator.page_size = 20
+    page = paginator.paginate_queryset(qs, request)
+
+    data = [{
+        'id': n.id,
+        'title': n.title,
+        'body': n.body,
+        'type': n.notification_type,
+        'related_id': n.related_id,
+        'is_read': n.is_read,
+        'created_at': n.created_at,
+    } for n in page]
+
+    return paginator.get_paginated_response(data)
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def mark_notification_read(request, notification_id):
+    """
+    Mark a single notification as read
+
+    PATCH /api/accounts/notifications/{id}/read/
+    """
+    from .models import Notification
+    updated = Notification.objects.filter(id=notification_id, user=request.user).update(is_read=True)
+    if not updated:
+        return Response({'error': 'Notification not found'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({'message': 'Marked as read'})
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def mark_all_notifications_read(request):
+    """
+    Mark all notifications as read
+
+    PATCH /api/accounts/notifications/read-all/
+    """
+    from .models import Notification
+    count = Notification.objects.filter(user=request.user, is_read=False).update(is_read=True)
+    return Response({'message': f'{count} notifications marked as read'})
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_user_profile(request, user_id):

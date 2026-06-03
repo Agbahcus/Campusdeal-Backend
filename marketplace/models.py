@@ -462,6 +462,45 @@ class HostelListing(models.Model):
         self.save(update_fields=['views_count'])
 
 
+class Offer(models.Model):
+    """Buyer sends an offer to a seller for a negotiable item"""
+    item = models.ForeignKey(ItemListing, on_delete=models.CASCADE, related_name='offers')
+    buyer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='offers_made')
+    proposed_price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    message = models.TextField(blank=True, max_length=300)
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+        ('expired', 'Expired'),
+    ]
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    delivery_method = models.CharField(
+        max_length=15,
+        choices=[('campusdeal', 'CampusDeal'), ('seller', 'Seller'), ('pickup', 'Pickup')],
+        default='pickup'
+    )
+
+    # Set when seller accepts - links to the created order
+    order = models.OneToOneField(
+        'Order', on_delete=models.SET_NULL, null=True, blank=True, related_name='offer'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['item', 'status']),
+            models.Index(fields=['buyer', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"Offer by {self.buyer.username} on {self.item.title} - ₦{self.proposed_price}"
+
+
 class Withdrawal(models.Model):
     """Withdrawal requests and history"""
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='withdrawals')

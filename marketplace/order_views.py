@@ -10,12 +10,7 @@ from django.views.decorators.csrf import csrf_exempt
 from decimal import Decimal
 import uuid
 
-from .models import (
-    ItemListing, 
-    Order, 
-    OrderStatusHistory, 
-    WalletTransaction
-)
+from .models import ItemListing, Order, OrderStatusHistory, WalletTransaction
 from .order_serializers import (
     OrderSerializer,
     OrderListSerializer,
@@ -23,7 +18,7 @@ from .order_serializers import (
     CheckoutOrderSerializer,
     OrderStatusUpdateSerializer,
     OrderStatusHistorySerializer,
-    PaymentInitializationSerializer
+    PaymentInitializationSerializer,
 )
 from .payment_service import paystack_service
 from .ledger_service import FinancialLedgerService
@@ -35,10 +30,10 @@ from .background_jobs import (
     send_user_sms_notification,
 )
 from accounts.models import Profile
+from accounts.fcm_service import notify_user
 
 
 # ============ ORDER MANAGEMENT ============
-
 
 def _can_update_order_status(user, order, new_status):
     if new_status in ['seller_preparing', 'with_courier', 'delivered']:
@@ -52,84 +47,52 @@ def _can_update_order_status(user, order, new_status):
 @permission_classes([IsAuthenticated])
 def initiate_order(request):
     """
-    Seller confirms sale and creates order
-    
+    Seller creates an order for a buyer after negotiation
+
     POST /api/marketplace/orders/initiate/
     Body: {
         "item_id": 123,
         "buyer_id": 456,
-        "delivery_method": "campusdeal"  // or "seller" or "pickup"
+        "delivery_method": "pickup"
     }
     """
     serializer = InitiateOrderSerializer(data=request.data)
-    
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     seller = request.user
     item_id = serializer.validated_data['item_id']
     buyer_id = serializer.validated_data['buyer_id']
     delivery_method = serializer.validated_data['delivery_method']
-    
+
     try:
         with db_transaction.atomic():
-            # Lock the item row to prevent concurrent orders
             item = ItemListing.objects.select_for_update().get(id=item_id)
-            
+
             if item.seller != seller:
-                return Response(
-                    {"error": "You don't own this item"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-            
+                return Response({'error': "You don't own this item"}, status=status.HTTP_403_FORBIDDEN)
+
             if item.status != 'active':
-                return Response(
-                    {"error": "Item is not available for sale"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-    
-            # Validate delivery method is allowed
+                return Response({'error': 'Item is not available for sale'}, status=status.HTTP_400_BAD_REQUEST)
+
             if delivery_method == 'campusdeal' and not item.allow_campusdeal_delivery:
-                return Response(
-                    {"error": "CampusDeal delivery not available for this item"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
+                return Response({'error': 'CampusDeal delivery not available for this item'}, status=status.HTTP_400_BAD_REQUEST)
             if delivery_method == 'seller' and not item.allow_seller_delivery:
-                return Response(
-                    {"error": "Seller delivery not available for this item"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
+                return Response({'error': 'Seller delivery not available for this item'}, status=status.HTTP_400_BAD_REQUEST)
             if delivery_method == 'pickup' and not item.allow_pickup:
-                return Response(
-                    {"error": "Pickup not available for this item"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Get buyer
+                return Response({'error': 'Pickup not available for this item'}, status=status.HTTP_400_BAD_REQUEST)
+
             from django.contrib.auth.models import User
             buyer = get_object_or_404(User, id=buyer_id)
 
             if buyer == seller:
-                return Response(
-                    {"error": "Buyer and seller cannot be the same user"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Calculate fees
+                return Response({'error': 'Buyer and seller cannot be the same user'}, status=status.HTTP_400_BAD_REQUEST)
+
             item_price = item.price
-            service_fee = item_price * Decimal('0.035')  # 3.5% platform fee
-            
-            # Delivery fee logic
-            if delivery_method == 'campusdeal':
-                delivery_fee = Decimal('500.00')
-            else:
-                delivery_fee = Decimal('0.00')
-            
+            service_fee = item_price * Decimal('0.035')
+            delivery_fee = Decimal('500.00') if delivery_method == 'campusdeal' else Decimal('0.00')
             total_amount = item_price + service_fee + delivery_fee
-            
-            # Create order
+
             order = Order.objects.create(
                 item=item,
                 buyer=buyer,
@@ -139,49 +102,48 @@ def initiate_order(request):
                 service_fee=service_fee,
                 delivery_fee=delivery_fee,
                 total_amount=total_amount,
-                status='payment_pending'
+                status='payment_pending',
             )
-            
-            # Generate waybill if CampusDeal delivery
+
             if delivery_method == 'campusdeal':
-                order.waybill_number = f"WB{uuid.uuid4().hex[:8].upper()}"
+                order.waybill_number = f'WB{uuid.uuid4().hex[:8].upper()}'
                 order.save()
-            
-            # Update item status ATOMICALLY
+
             item.status = 'pending'
             item.save()
-            
-            # Log status change
+
             OrderStatusHistory.objects.create(
-                order=order,
-                from_status='',
-                to_status='payment_pending',
-                changed_by=seller
+                order=order, from_status='', to_status='payment_pending', changed_by=seller
             )
-        
+
+        # Notify buyer to pay
+        run_after_commit(
+            'initiate-order-notify-buyer',
+            notify_user,
+            buyer,
+            'Order Created — Pay Now',
+            f'{seller.get_full_name() or seller.username} created an order for {item.title}. Total: ₦{total_amount:,.0f}. Proceed to payment.',
+            notification_type='order_created',
+            related_id=order.order_id,
+        )
+
         return Response({
-            "order_id": order.order_id,
-            "total_amount": str(total_amount),
-            "breakdown": {
-                "item_price": str(item_price),
-                "service_fee": str(service_fee),
-                "delivery_fee": str(delivery_fee)
+            'order_id': order.order_id,
+            'total_amount': str(total_amount),
+            'breakdown': {
+                'item_price': str(item_price),
+                'service_fee': str(service_fee),
+                'delivery_fee': str(delivery_fee),
             },
-            "waybill_number": order.waybill_number,
-            "payment_required": True,
-            "message": "Order created. Waiting for buyer payment."
+            'waybill_number': order.waybill_number,
+            'payment_required': True,
+            'message': 'Order created. Waiting for buyer payment.',
         }, status=status.HTTP_201_CREATED)
-        
+
     except ItemListing.DoesNotExist:
-        return Response(
-            {"error": "Item not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
-    except Exception as e:
-        return Response(
-            {"error": "Order creation failed"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        return Response({'error': 'Item not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception:
+        return Response({'error': 'Order creation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -193,7 +155,7 @@ def buyer_order(request):
     POST /api/marketplace/orders/buy/
     Body: {
         "item_id": 123,
-        "delivery_method": "pickup"  // or "seller" or "campusdeal"
+        "delivery_method": "pickup"
     }
     """
     item_id = request.data.get('item_id')
@@ -214,7 +176,7 @@ def buyer_order(request):
             if item.is_negotiable:
                 return Response(
                     {'error': 'This item is negotiable. Contact the seller to agree on a price first.'},
-                    status=status.HTTP_400_BAD_REQUEST
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
             if item.status != 'active':
@@ -244,22 +206,30 @@ def buyer_order(request):
                 service_fee=service_fee,
                 delivery_fee=delivery_fee,
                 total_amount=total_amount,
-                status='payment_pending'
+                status='payment_pending',
             )
 
             if delivery_method == 'campusdeal':
-                order.waybill_number = f"WB{uuid.uuid4().hex[:8].upper()}"
+                order.waybill_number = f'WB{uuid.uuid4().hex[:8].upper()}'
                 order.save()
 
             item.status = 'pending'
             item.save()
 
             OrderStatusHistory.objects.create(
-                order=order,
-                from_status='',
-                to_status='payment_pending',
-                changed_by=buyer
+                order=order, from_status='', to_status='payment_pending', changed_by=buyer
             )
+
+        # Notify seller
+        run_after_commit(
+            'buyer-order-notify-seller',
+            notify_user,
+            item.seller,
+            'New Order Received',
+            f'{buyer.get_full_name() or buyer.username} bought your {item.title}. Order {order.order_id} created.',
+            notification_type='order_created',
+            related_id=order.order_id,
+        )
 
         return Response({
             'order_id': order.order_id,
@@ -267,10 +237,10 @@ def buyer_order(request):
             'breakdown': {
                 'item_price': str(item_price),
                 'service_fee': str(service_fee),
-                'delivery_fee': str(delivery_fee)
+                'delivery_fee': str(delivery_fee),
             },
             'waybill_number': order.waybill_number,
-            'message': 'Order created. Please proceed to payment.'
+            'message': 'Order created. Please proceed to payment.',
         }, status=status.HTTP_201_CREATED)
 
     except ItemListing.DoesNotExist:
@@ -283,87 +253,55 @@ def buyer_order(request):
 @permission_classes([IsAuthenticated])
 def checkout_order(request, order_id):
     """
-    Buyer proceeds to payment
-    
     POST /api/marketplace/orders/{order_id}/checkout/
-    Body: {
-        "payment_method": "paystack",  // or "wallet"
-        "delivery_address": "123 Main St",  // required for delivery
-        "delivery_phone": "+2348012345678"  // required for delivery
-    }
     """
     buyer = request.user
     order = get_object_or_404(Order, order_id=order_id, buyer=buyer)
-    
+
     if order.status != 'payment_pending':
-        return Response(
-            {"error": "Order is not awaiting payment"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    serializer = CheckoutOrderSerializer(
-        data=request.data,
-        context={'order': order}
-    )
-    
+        return Response({'error': 'Order is not awaiting payment'}, status=status.HTTP_400_BAD_REQUEST)
+
+    serializer = CheckoutOrderSerializer(data=request.data, context={'order': order})
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     payment_method = serializer.validated_data['payment_method']
     idempotency_key = get_request_id(request, fallback='checkout')
-    
-    # Update delivery details if applicable
+
     if order.delivery_method in ['campusdeal', 'seller']:
         order.delivery_address = serializer.validated_data.get('delivery_address', '')
         order.delivery_phone = serializer.validated_data.get('delivery_phone', '')
         order.save()
-    
+
     if payment_method == 'wallet':
         return process_wallet_payment(order, buyer)
     elif payment_method == 'paystack':
         return initialize_paystack_payment(order, buyer, idempotency_key=idempotency_key)
     else:
-        return Response(
-            {"error": "Invalid payment method"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({'error': 'Invalid payment method'}, status=status.HTTP_400_BAD_REQUEST)
 
 
 def process_wallet_payment(order, buyer):
-    """Process payment using wallet balance with race condition protection"""
-
     if order.status != 'payment_pending':
-        return Response(
-            {"error": "Order is not awaiting payment"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
+        return Response({'error': 'Order is not awaiting payment'}, status=status.HTTP_400_BAD_REQUEST)
+
     try:
         with db_transaction.atomic():
-            # Lock the profile row to prevent concurrent access
             profile = Profile.objects.select_for_update().get(user=buyer)
-            
-            # Check balance
+
             if profile.wallet_balance < order.total_amount:
                 return Response({
-                    "error": "Insufficient wallet balance",
-                    "available": str(profile.wallet_balance),
-                    "required": str(order.total_amount)
+                    'error': 'Insufficient wallet balance',
+                    'available': str(profile.wallet_balance),
+                    'required': str(order.total_amount),
                 }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Store balance before
+
             balance_before = profile.wallet_balance
-            
-            # Use F() expression for atomic update
+
             from django.db.models import F
-            Profile.objects.filter(user=buyer).update(
-                wallet_balance=F('wallet_balance') - order.total_amount
-            )
-            
-            # Refresh to get new balance
+            Profile.objects.filter(user=buyer).update(wallet_balance=F('wallet_balance') - order.total_amount)
             profile.refresh_from_db()
-            
-            # Log transaction
+
             WalletTransaction.objects.create(
                 user=buyer,
                 transaction_type='debit',
@@ -371,105 +309,87 @@ def process_wallet_payment(order, buyer):
                 source='purchase',
                 related_order=order,
                 balance_before=balance_before,
-                balance_after=profile.wallet_balance
+                balance_after=profile.wallet_balance,
             )
-            
-            # Update order
+
             order.status = 'paid'
             order.funds_held = True
             order.payment_method = 'wallet'
             order.paid_at = timezone.now()
             order.save()
-            
-            # Log status change
+
             OrderStatusHistory.objects.create(
-                order=order,
-                from_status='payment_pending',
-                to_status='paid',
-                changed_by=buyer
+                order=order, from_status='payment_pending', to_status='paid', changed_by=buyer
             )
 
             FinancialLedgerService.record_order_payment(order=order, payment_method='wallet', created_by=buyer)
-        
+
+        run_after_commit(
+            'wallet-payment-notify-seller',
+            notify_user,
+            order.seller,
+            'Payment Received',
+            f'Payment of ₦{order.total_amount:,.0f} received for order {order.order_id}. Prepare the item.',
+            notification_type='payment_received',
+            related_id=order.order_id,
+        )
+
         return Response({
-            "success": True,
-            "order_id": order.order_id,
-            "status": "paid",
-            "message": "Payment successful. Seller will prepare your item.",
-            "waybill_number": order.waybill_number
+            'success': True,
+            'order_id': order.order_id,
+            'status': 'paid',
+            'message': 'Payment successful. Seller will prepare your item.',
+            'waybill_number': order.waybill_number,
         })
-        
+
     except Profile.DoesNotExist:
-        return Response(
-            {"error": "Profile not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
-    except Exception as e:
-        return Response(
-            {"error": "Payment processing failed"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        return Response({'error': 'Profile not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception:
+        return Response({'error': 'Payment processing failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 def initialize_paystack_payment(order, buyer, idempotency_key='checkout'):
-    """Initialize payment with Paystack"""
-
     if order.status != 'payment_pending':
-        return Response(
-            {"error": "Order is not awaiting payment"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({'error': 'Order is not awaiting payment'}, status=status.HTTP_400_BAD_REQUEST)
 
     if order.paystack_reference and order.paystack_access_code:
         return Response({
-            "authorization_url": f"https://checkout.paystack.com/{order.paystack_access_code}",
-            "access_code": order.paystack_access_code,
-            "reference": order.paystack_reference,
-            "message": "Existing payment session reused"
+            'authorization_url': f'https://checkout.paystack.com/{order.paystack_access_code}',
+            'access_code': order.paystack_access_code,
+            'reference': order.paystack_reference,
+            'message': 'Existing payment session reused',
         })
 
     reference = build_reference('PAY', order.order_id, buyer.id, 'paystack', idempotency_key)
-    
-    # Callback URL (frontend will handle this)
-    callback_url = f"{settings.FRONTEND_URL}/payment/verify"
-    
-    # Prepare metadata
+    callback_url = f'{settings.FRONTEND_URL}/payment/verify'
+
     metadata = {
-        "order_id": order.order_id,
-        "buyer_id": buyer.id,
-        "custom_fields": [
-            {
-                "display_name": "Order ID",
-                "variable_name": "order_id",
-                "value": order.order_id
-            }
-        ]
+        'order_id': order.order_id,
+        'buyer_id': buyer.id,
+        'custom_fields': [{'display_name': 'Order ID', 'variable_name': 'order_id', 'value': order.order_id}],
     }
-    
-    # Initialize with Paystack
+
     result = paystack_service.initialize_payment(
         email=buyer.email,
-        amount=order.total_amount * 100,  # Convert to kobo
+        amount=order.total_amount * 100,
         reference=reference,
         callback_url=callback_url,
-        metadata=metadata
+        metadata=metadata,
     )
-    
+
     if result.get('status'):
-        # Save Paystack reference
         order.paystack_reference = reference
         order.paystack_access_code = result['data']['access_code']
         order.save()
-        
         return Response({
-            "authorization_url": result['data']['authorization_url'],
-            "access_code": result['data']['access_code'],
-            "reference": reference
+            'authorization_url': result['data']['authorization_url'],
+            'access_code': result['data']['access_code'],
+            'reference': reference,
         })
     else:
         return Response({
-            "error": "Payment initialization failed",
-            "message": result.get('message')
+            'error': 'Payment initialization failed',
+            'message': result.get('message'),
         }, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -477,60 +397,32 @@ def initialize_paystack_payment(order, buyer, idempotency_key='checkout'):
 @permission_classes([IsAuthenticated])
 def verify_payment(request):
     """
-    Verify Paystack payment
-    
     POST /api/marketplace/payments/verify/
-    Body: {
-        "reference": "CD123_1234567890"
-    }
     """
     reference = request.data.get('reference')
-    
     if not reference:
-        return Response(
-            {"error": "Reference is required"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # Get order
+        return Response({'error': 'Reference is required'}, status=status.HTTP_400_BAD_REQUEST)
+
     order = get_object_or_404(Order, paystack_reference=reference)
 
     if request.user != order.buyer and not request.user.is_staff:
-        return Response(
-            {"error": "You don't have permission to verify this payment"},
-            status=status.HTTP_403_FORBIDDEN
-        )
+        return Response({'error': "You don't have permission to verify this payment"}, status=status.HTTP_403_FORBIDDEN)
 
     if order.status == 'paid' and order.funds_held:
-        return Response({
-            "success": True,
-            "order_id": order.order_id,
-            "status": "paid",
-            "message": "Payment already verified"
-        })
+        return Response({'success': True, 'order_id': order.order_id, 'status': 'paid', 'message': 'Payment already verified'})
 
-    # Verify with Paystack
     result = paystack_service.verify_payment(reference)
 
     if result.get('status') and result['data']['status'] == 'success':
         metadata = result['data'].get('metadata') or {}
         verified_buyer_id = metadata.get('buyer_id')
         if verified_buyer_id and int(verified_buyer_id) != request.user.id:
-            return Response(
-                {"error": "Payment reference does not belong to this user"},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({'error': 'Payment reference does not belong to this user'}, status=status.HTTP_403_FORBIDDEN)
 
-        # Payment successful
         with db_transaction.atomic():
             order = Order.objects.select_for_update().get(pk=order.pk)
             if order.status == 'paid' and order.funds_held:
-                return Response({
-                    "success": True,
-                    "order_id": order.order_id,
-                    "status": "paid",
-                    "message": "Payment already verified"
-                })
+                return Response({'success': True, 'order_id': order.order_id, 'status': 'paid', 'message': 'Payment already verified'})
 
             old_status = order.status
             order.status = 'paid'
@@ -539,81 +431,51 @@ def verify_payment(request):
             order.paid_at = timezone.now()
             order.save()
 
-            OrderStatusHistory.objects.create(
-                order=order,
-                from_status=old_status,
-                to_status='paid',
-                changed_by=request.user
-            )
-
+            OrderStatusHistory.objects.create(order=order, from_status=old_status, to_status='paid', changed_by=request.user)
             FinancialLedgerService.record_order_payment(order=order, payment_method='paystack', created_by=request.user)
 
-            seller_message = (
-                f"CampusDeal payment received for order {order.order_id}. "
-                f"Buyer payment is now secured."
-            )
-            buyer_message = (
-                f"CampusDeal payment verified for order {order.order_id}. "
-                f"Your payment is now secured."
-            )
+            run_after_commit('order-payment-seller-sms', send_user_sms_notification, order.seller,
+                f'CampusDeal payment received for order {order.order_id}. Buyer payment is now secured.')
+            run_after_commit('order-payment-buyer-sms', send_user_sms_notification, order.buyer,
+                f'CampusDeal payment verified for order {order.order_id}. Your payment is now secured.')
+            run_after_commit('order-payment-seller-push', notify_user, order.seller,
+                'Payment Received', f'₦{order.total_amount:,.0f} secured for order {order.order_id}. Prepare the item.',
+                notification_type='payment_received', related_id=order.order_id)
+            run_after_commit('order-payment-reconcile', refresh_financial_reconciliation_snapshot,
+                f'paystack payment {order.order_id}')
 
-            run_after_commit('order-payment-seller-notify', send_user_sms_notification, order.seller, seller_message)
-            run_after_commit('order-payment-buyer-notify', send_user_sms_notification, order.buyer, buyer_message)
-            run_after_commit('order-payment-reconcile', refresh_financial_reconciliation_snapshot, f'paystack payment {order.order_id}')
-        
-        return Response({
-            "success": True,
-            "order_id": order.order_id,
-            "status": "paid",
-            "message": "Payment verified successfully"
-        })
+        return Response({'success': True, 'order_id': order.order_id, 'status': 'paid', 'message': 'Payment verified successfully'})
     else:
         send_finance_alert(
             subject='CampusDeal payment verification failed',
-            message=f"Reference: {reference}\nUser: {request.user.id}\nPaystack response: {result.get('message') or result.get('error')}",
+            message=f'Reference: {reference}\nUser: {request.user.id}\nPaystack: {result.get("message") or result.get("error")}',
         )
-        return Response({
-            "success": False,
-            "message": "Payment verification failed"
-        }, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'Payment verification failed'}, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['POST'])
 @csrf_exempt
 def paystack_webhook(request):
     """
-    Receive and process Paystack webhooks
-    This is called by Paystack when payment events occur
-    
     POST /api/marketplace/payments/webhook/
     """
-    # Verify webhook signature
     paystack_signature = request.headers.get('x-paystack-signature')
-    
+
     if not paystack_service.verify_webhook_signature(request.body, paystack_signature):
-        send_finance_alert(
-            subject='CampusDeal webhook signature rejected',
-            message='Received Paystack webhook with invalid signature.',
-        )
-        return Response(
-            {"error": "Invalid signature"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # Process event
+        send_finance_alert(subject='CampusDeal webhook signature rejected', message='Invalid signature.')
+        return Response({'error': 'Invalid signature'}, status=status.HTTP_400_BAD_REQUEST)
+
     event = request.data.get('event')
     data = request.data.get('data')
 
     if event == 'charge.success':
-        # Payment successful
         reference = data['reference']
-
         try:
             with db_transaction.atomic():
                 order = Order.objects.select_for_update().get(paystack_reference=reference)
 
                 if order.status == 'paid' and order.funds_held:
-                    return Response({"status": "success"})
+                    return Response({'status': 'success'})
 
                 old_status = order.status
                 order.status = 'paid'
@@ -622,71 +484,48 @@ def paystack_webhook(request):
                 order.paid_at = timezone.now()
                 order.save()
 
-                OrderStatusHistory.objects.create(
-                    order=order,
-                    from_status=old_status,
-                    to_status='paid'
-                )
-
+                OrderStatusHistory.objects.create(order=order, from_status=old_status, to_status='paid')
                 FinancialLedgerService.record_order_payment(order=order, payment_method='paystack', created_by=None)
 
-                seller_message = (
-                    f"CampusDeal payment received for order {order.order_id}. "
-                    f"Your buyer payment is now secured."
-                )
-                buyer_message = (
-                    f"CampusDeal payment verified for order {order.order_id}."
-                )
-                run_after_commit('webhook-order-payment-seller-notify', send_user_sms_notification, order.seller, seller_message)
-                run_after_commit('webhook-order-payment-buyer-notify', send_user_sms_notification, order.buyer, buyer_message)
-                run_after_commit('webhook-order-payment-reconcile', refresh_financial_reconciliation_snapshot, f'webhook payment {order.order_id}')
-            
+                run_after_commit('webhook-seller-sms', send_user_sms_notification, order.seller,
+                    f'CampusDeal payment received for order {order.order_id}.')
+                run_after_commit('webhook-buyer-sms', send_user_sms_notification, order.buyer,
+                    f'CampusDeal payment verified for order {order.order_id}.')
+                run_after_commit('webhook-seller-push', notify_user, order.seller,
+                    'Payment Received', f'Order {order.order_id} paid. Prepare the item.',
+                    notification_type='payment_received', related_id=order.order_id)
+                run_after_commit('webhook-reconcile', refresh_financial_reconciliation_snapshot,
+                    f'webhook payment {order.order_id}')
+
         except Order.DoesNotExist:
-            send_finance_alert(
-                subject='CampusDeal webhook unknown reference',
-                message=f"Received Paystack charge.success for unknown reference: {reference}",
-            )
+            send_finance_alert(subject='CampusDeal webhook unknown reference',
+                message=f'Unknown reference: {reference}')
         except Exception as exc:
-            send_finance_alert(
-                subject='CampusDeal webhook processing failed',
-                message=f"Reference: {reference}\nError: {exc}",
-            )
-    
-    return Response({"status": "success"})
+            send_finance_alert(subject='CampusDeal webhook processing failed',
+                message=f'Reference: {reference}\nError: {exc}')
+
+    return Response({'status': 'success'})
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def list_orders(request):
     """
-    Get user's orders (buyer or seller view)
-    
     GET /api/marketplace/orders/
-    Query params:
-    - role: buyer|seller
-    - status: payment_pending|paid|delivered|completed|cancelled
     """
     user = request.user
     role = request.query_params.get('role', 'buyer')
 
     if role not in ['buyer', 'seller']:
-        return Response(
-            {"error": "Invalid role. Must be buyer or seller."},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    if role == 'buyer':
-        orders = Order.objects.filter(buyer=user)
-    else:
-        orders = Order.objects.filter(seller=user)
-    
-    # Filter by status if provided
+        return Response({'error': 'Invalid role. Must be buyer or seller.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    orders = Order.objects.filter(buyer=user) if role == 'buyer' else Order.objects.filter(seller=user)
+
     status_filter = request.query_params.get('status')
     if status_filter:
         orders = orders.filter(status=status_filter)
-    
+
     orders = orders.select_related('item', 'buyer', 'seller').order_by('-created_at')
-    
     serializer = OrderListSerializer(orders, many=True)
     return Response(serializer.data)
 
@@ -695,22 +534,13 @@ def list_orders(request):
 @permission_classes([IsAuthenticated])
 def get_order(request, order_id):
     """
-    Get single order detail
-    
     GET /api/marketplace/orders/{order_id}/
     """
-    order = get_object_or_404(
-        Order.objects.select_related('item', 'buyer', 'seller'),
-        order_id=order_id
-    )
-    
-    # Check user is buyer or seller
+    order = get_object_or_404(Order.objects.select_related('item', 'buyer', 'seller'), order_id=order_id)
+
     if request.user not in [order.buyer, order.seller]:
-        return Response(
-            {"error": "You don't have permission to view this order"},
-            status=status.HTTP_403_FORBIDDEN
-        )
-    
+        return Response({'error': "You don't have permission to view this order"}, status=status.HTTP_403_FORBIDDEN)
+
     serializer = OrderSerializer(order)
     return Response(serializer.data)
 
@@ -719,96 +549,64 @@ def get_order(request, order_id):
 @permission_classes([IsAuthenticated])
 def update_order_status(request, order_id):
     """
-    Update order status (seller only for most statuses)
-    
     PATCH /api/marketplace/orders/{order_id}/update-status/
-    Body: {
-        "status": "seller_preparing",
-        "notes": "Item is being packed"
-    }
     """
     order = get_object_or_404(Order, order_id=order_id)
-    
     serializer = OrderStatusUpdateSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     new_status = serializer.validated_data['status']
     notes = serializer.validated_data.get('notes', '')
-    
-    # Validate user can update status
+
     if not _can_update_order_status(request.user, order, new_status):
-        return Response(
-            {"error": "You don't have permission to set this status"},
-            status=status.HTTP_403_FORBIDDEN
-        )
+        return Response({'error': "You don't have permission to set this status"}, status=status.HTTP_403_FORBIDDEN)
 
     if order.status == new_status:
-        return Response({
-            "success": True,
-            "order_id": order.order_id,
-            "status": new_status,
-            "message": f"Order already in {new_status} status"
-        })
-    
-    # Update order
+        return Response({'success': True, 'order_id': order.order_id, 'status': new_status, 'message': f'Order already in {new_status} status'})
+
     old_status = order.status
     order.status = new_status
-    
     if new_status == 'delivered':
         order.delivered_at = timezone.now()
-    
     order.save()
-    
-    # Log status change
-    OrderStatusHistory.objects.create(
-        order=order,
-        from_status=old_status,
-        to_status=new_status,
-        notes=notes,
-        changed_by=request.user
+
+    OrderStatusHistory.objects.create(order=order, from_status=old_status, to_status=new_status, notes=notes, changed_by=request.user)
+
+    # Notify the other party
+    recipient = order.buyer if request.user == order.seller else order.seller
+    run_after_commit(
+        'order-status-push',
+        notify_user,
+        recipient,
+        'Order Update',
+        f'Order {order.order_id} status changed to {new_status}.',
+        notification_type='order_status',
+        related_id=order.order_id,
     )
-    
-    return Response({
-        "success": True,
-        "order_id": order.order_id,
-        "status": new_status,
-        "message": f"Order status updated to {new_status}"
-    })
+
+    return Response({'success': True, 'order_id': order.order_id, 'status': new_status, 'message': f'Order status updated to {new_status}'})
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def confirm_delivery(request, order_id):
     """
-    Buyer confirms delivery - triggers fund release to seller
-    
     POST /api/marketplace/orders/{order_id}/confirm-delivery/
     """
     order = get_object_or_404(Order, order_id=order_id, buyer=request.user)
-    
+
     if order.status not in ['delivered', 'paid']:
-        return Response(
-            {"error": "Order must be delivered before confirmation"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # Update order with atomic wallet update
+        return Response({'error': 'Order must be delivered before confirmation'}, status=status.HTTP_400_BAD_REQUEST)
+
     with db_transaction.atomic():
-        # Lock seller profile
         from django.db.models import F
         seller_profile = Profile.objects.select_for_update().get(user=order.seller)
         balance_before = seller_profile.wallet_balance
-        
-        # Use F() expression for atomic update
-        Profile.objects.filter(user=order.seller).update(
-            wallet_balance=F('wallet_balance') + order.item_price
-        )
-        
-        # Refresh to get new balance
+
+        Profile.objects.filter(user=order.seller).update(wallet_balance=F('wallet_balance') + order.item_price)
         seller_profile.refresh_from_db()
-        
-        # Log wallet transaction
+
         WalletTransaction.objects.create(
             user=order.seller,
             transaction_type='credit',
@@ -816,86 +614,87 @@ def confirm_delivery(request, order_id):
             source='sale',
             related_order=order,
             balance_before=balance_before,
-            balance_after=seller_profile.wallet_balance
+            balance_after=seller_profile.wallet_balance,
         )
-        
-        # Update order
+
         order.status = 'completed'
         order.completed_at = timezone.now()
         order.funds_released_to_seller = True
         order.save()
-        
-        # Update item status
+
         order.item.status = 'sold'
         order.item.save()
-        
-        # Log status change
-        OrderStatusHistory.objects.create(
-            order=order,
-            from_status='delivered',
-            to_status='completed',
-            changed_by=request.user
-        )
-    
-    return Response({
-        "success": True,
-        "message": "Delivery confirmed. Funds released to seller.",
-        "order_id": order.order_id
-    })
+
+        OrderStatusHistory.objects.create(order=order, from_status='delivered', to_status='completed', changed_by=request.user)
+
+    run_after_commit(
+        'confirm-delivery-notify-seller',
+        notify_user,
+        order.seller,
+        'Payment Released!',
+        f'Buyer confirmed delivery for order {order.order_id}. ₦{order.item_price:,.0f} added to your wallet.',
+        notification_type='delivery_confirmed',
+        related_id=order.order_id,
+    )
+
+    return Response({'success': True, 'message': 'Delivery confirmed. Funds released to seller.', 'order_id': order.order_id})
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def order_status_history(request, order_id):
     """
-    Get order status history
-    
     GET /api/marketplace/orders/{order_id}/status-history/
     """
     order = get_object_or_404(Order, order_id=order_id)
-    
-    # Check permission
+
     if request.user not in [order.buyer, order.seller]:
-        return Response(
-            {"error": "You don't have permission to view this order"},
-            status=status.HTTP_403_FORBIDDEN
-        )
-    
+        return Response({'error': "You don't have permission to view this order"}, status=status.HTTP_403_FORBIDDEN)
+
     history = order.status_history.all().order_by('-created_at')
     serializer = OrderStatusHistorySerializer(history, many=True)
     return Response(serializer.data)
 
 
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def cancel_order(request, order_id):
-    """Cancel order and process refund if paid"""
+    """
+    POST /api/marketplace/orders/{order_id}/cancel/
+    """
     order = get_object_or_404(Order, order_id=order_id)
-    
+
     if request.user not in [order.buyer, order.seller]:
-        return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
-    
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
     if order.status in ['completed', 'cancelled', 'refunded']:
-        return Response({"error": "Order cannot be cancelled"}, status=status.HTTP_400_BAD_REQUEST)
-    
+        return Response({'error': 'Order cannot be cancelled'}, status=status.HTTP_400_BAD_REQUEST)
+
     with db_transaction.atomic():
         old_status = order.status
-        
+
         if order.status == 'paid' and order.funds_held:
-            FinancialLedgerService.process_order_refund(
-                order=order,
-                created_by=request.user,
-                source='refund',
-            )
-        
+            FinancialLedgerService.process_order_refund(order=order, created_by=request.user, source='refund')
+
         order.status = 'cancelled'
         order.save()
-        
+
         if order.item.status == 'pending':
             order.item.status = 'active'
             order.item.save()
-        
+
         OrderStatusHistory.objects.create(order=order, from_status=old_status, to_status='cancelled', changed_by=request.user, notes='Order cancelled by user')
-    
-    return Response({"message": "Order cancelled successfully", "refund_amount": str(order.total_amount) if old_status == 'paid' else "0.00"})
+
+    # Notify the other party
+    recipient = order.buyer if request.user == order.seller else order.seller
+    run_after_commit(
+        'cancel-order-notify',
+        notify_user,
+        recipient,
+        'Order Cancelled',
+        f'Order {order.order_id} has been cancelled.',
+        notification_type='order_status',
+        related_id=order.order_id,
+    )
+
+    return Response({'message': 'Order cancelled successfully', 'refund_amount': str(order.total_amount) if old_status == 'paid' else '0.00'})

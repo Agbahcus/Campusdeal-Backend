@@ -299,6 +299,9 @@ PAYSTACK_VERIFY_URL = 'https://api.paystack.co/transaction/verify'
 MAX_UPLOAD_SIZE = 5242880  # 5MB in bytes
 ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/jpg']
 
+# FCM Push Notifications
+FCM_SERVER_KEY = config('FCM_SERVER_KEY', default='')
+
 # Frontend URL
 FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
 
