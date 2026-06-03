@@ -29,6 +29,7 @@ urlpatterns = [
     path('users/<int:user_id>/listings/', views.user_listings, name='user-listings'),
     
     # Orders
+    path('orders/buy/', order_views.buyer_order, name='buyer-order'),
     path('orders/initiate/', order_views.initiate_order, name='initiate-order'),
     path('orders/', order_views.list_orders, name='list-orders'),
     path('orders/<str:order_id>/', order_views.get_order, name='get-order'),

@@ -186,6 +186,101 @@ def initiate_order(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+def buyer_order(request):
+    """
+    Buyer directly creates an order for a non-negotiable item
+
+    POST /api/marketplace/orders/buy/
+    Body: {
+        "item_id": 123,
+        "delivery_method": "pickup"  // or "seller" or "campusdeal"
+    }
+    """
+    item_id = request.data.get('item_id')
+    delivery_method = request.data.get('delivery_method', 'pickup')
+
+    if not item_id:
+        return Response({'error': 'item_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if delivery_method not in ['campusdeal', 'seller', 'pickup']:
+        return Response({'error': 'Invalid delivery method'}, status=status.HTTP_400_BAD_REQUEST)
+
+    buyer = request.user
+
+    try:
+        with db_transaction.atomic():
+            item = ItemListing.objects.select_for_update().get(id=item_id)
+
+            if item.is_negotiable:
+                return Response(
+                    {'error': 'This item is negotiable. Contact the seller to agree on a price first.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if item.status != 'active':
+                return Response({'error': 'Item is not available for sale'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if item.seller == buyer:
+                return Response({'error': 'You cannot buy your own item'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if delivery_method == 'campusdeal' and not item.allow_campusdeal_delivery:
+                return Response({'error': 'CampusDeal delivery not available for this item'}, status=status.HTTP_400_BAD_REQUEST)
+            if delivery_method == 'seller' and not item.allow_seller_delivery:
+                return Response({'error': 'Seller delivery not available for this item'}, status=status.HTTP_400_BAD_REQUEST)
+            if delivery_method == 'pickup' and not item.allow_pickup:
+                return Response({'error': 'Pickup not available for this item'}, status=status.HTTP_400_BAD_REQUEST)
+
+            item_price = item.price
+            service_fee = item_price * Decimal('0.035')
+            delivery_fee = Decimal('500.00') if delivery_method == 'campusdeal' else Decimal('0.00')
+            total_amount = item_price + service_fee + delivery_fee
+
+            order = Order.objects.create(
+                item=item,
+                buyer=buyer,
+                seller=item.seller,
+                delivery_method=delivery_method,
+                item_price=item_price,
+                service_fee=service_fee,
+                delivery_fee=delivery_fee,
+                total_amount=total_amount,
+                status='payment_pending'
+            )
+
+            if delivery_method == 'campusdeal':
+                order.waybill_number = f"WB{uuid.uuid4().hex[:8].upper()}"
+                order.save()
+
+            item.status = 'pending'
+            item.save()
+
+            OrderStatusHistory.objects.create(
+                order=order,
+                from_status='',
+                to_status='payment_pending',
+                changed_by=buyer
+            )
+
+        return Response({
+            'order_id': order.order_id,
+            'total_amount': str(total_amount),
+            'breakdown': {
+                'item_price': str(item_price),
+                'service_fee': str(service_fee),
+                'delivery_fee': str(delivery_fee)
+            },
+            'waybill_number': order.waybill_number,
+            'message': 'Order created. Please proceed to payment.'
+        }, status=status.HTTP_201_CREATED)
+
+    except ItemListing.DoesNotExist:
+        return Response({'error': 'Item not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception:
+        return Response({'error': 'Order creation failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def checkout_order(request, order_id):
     """
     Buyer proceeds to payment
