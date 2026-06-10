@@ -107,12 +107,8 @@ class FinancialLedgerService:
     def reverse_order_payment(order, created_by, note='Order cancelled'):
         with transaction.atomic():
             financials = PlatformFinancials.get_instance()
-            if order.payment_method == 'paystack':
-                user_liability_change = -order.item_price
-                paystack_delta = -order.total_amount
-            else:
-                user_liability_change = order.service_fee + order.delivery_fee
-                paystack_delta = Decimal('0')
+            user_liability_change = order.service_fee + order.delivery_fee
+            paystack_delta = Decimal('0')
 
             financials.user_funds_liability += user_liability_change
             financials.platform_revenue -= order.service_fee

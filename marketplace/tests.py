@@ -134,9 +134,9 @@ class MarketplaceFlowTests(APITestCase):
 
         self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
         financials = PlatformFinancials.get_instance()
-        self.assertEqual(financials.user_funds_liability, Decimal('0'))
+        self.assertEqual(financials.user_funds_liability, order.total_amount)
         self.assertEqual(financials.platform_revenue, Decimal('0'))
-        self.assertEqual(financials.paystack_balance, Decimal('0'))
+        self.assertEqual(financials.paystack_balance, order.total_amount)
 
     def test_only_seller_can_move_order_to_delivery_state(self):
         order = self._create_paid_paystack_order()
