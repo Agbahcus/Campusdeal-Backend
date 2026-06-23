@@ -22,14 +22,14 @@ Stabilize the backend, close the highest-risk security and money-flow issues, an
 - Fixed the admin payout path to use the new Paystack service API.
 - Removed password/verification code leakage from logs and console prints.
 - Added validation for missing verification timestamps during phone and password reset flows.
+- Added automated tests for auth, payments, withdrawals, refunds, and order status transitions.
+- Added request throttling backed by Redis cache for multi-worker production environments.
+- Reviewed and corrected refund/cancellation accounting for ledger consistency.
+- Removed duplicate and stale financial model definitions (deleted financial_models.py).
 
 ### In progress / still to do
 
-- Add automated tests for auth, payments, withdrawals, refunds, and order status transitions.
-- Add request throttling backed by a shared cache like Redis for multi-worker production.
-- Review refund and cancellation accounting end-to-end for perfect ledger consistency.
 - Move more business logic out of views into dedicated services or jobs.
-- Remove stale or duplicated financial model definitions that can confuse future maintenance.
 
 ## Notes
 

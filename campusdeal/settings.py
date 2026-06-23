@@ -19,11 +19,12 @@ def _parse_debug_flag(value, default=True):
         return default
 
     normalized = str(value).strip().lower()
-    if normalized in {'1', 'true', 't', 'yes', 'y', 'on', 'release', 'prod', 'production', 'live'}:
+    if normalized in {'1', 'true', 't', 'yes', 'y', 'on'}:
         return True
-    if normalized in {'0', 'false', 'f', 'no', 'n', 'off'}:
+    if normalized in {'0', 'false', 'f', 'no', 'n', 'off', 'release', 'prod', 'production', 'live'}:
         return False
     return default
+
 
 
 DEBUG = _parse_debug_flag(os.environ.get('DEBUG'), default=False)

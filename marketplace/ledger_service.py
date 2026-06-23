@@ -207,6 +207,28 @@ class FinancialLedgerService:
             )
 
     @staticmethod
+    def record_failed_withdrawal(user, amount, withdrawal_fee, net_amount, related_withdrawal, created_by, reason=''):
+        with transaction.atomic():
+            financials = PlatformFinancials.get_instance()
+            financials.user_funds_liability += amount
+            financials.platform_revenue -= withdrawal_fee
+            financials.paystack_balance += net_amount
+            financials.save()
+
+            FinancialTransaction.objects.create(
+                transaction_type='reconciliation',
+                user_liability_change=amount,
+                platform_revenue_change=-withdrawal_fee,
+                paystack_balance_change=net_amount,
+                related_withdrawal=related_withdrawal,
+                notes=f'Failed withdrawal reversal for user {user.id}: {reason}',
+                user_liability_after=financials.user_funds_liability,
+                platform_revenue_after=financials.platform_revenue,
+                paystack_balance_after=financials.paystack_balance,
+                created_by=created_by,
+            )
+
+    @staticmethod
     def record_platform_withdrawal(amount, account_name, created_by):
         with transaction.atomic():
             financials = PlatformFinancials.get_instance()

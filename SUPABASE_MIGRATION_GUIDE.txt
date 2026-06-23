@@ -1,0 +1,104 @@
+Supabase Migration Guide for CampusDeal Backend
+
+Goal
+Replace the suspended Render Postgres database with Supabase, keep the Django backend working, and let the mobile app continue consuming the API normally.
+
+Important principle
+The mobile app should not connect to Supabase directly. The mobile app should keep calling the backend API. Only the backend database changes.
+
+What is already ready in this repo
+- The backend already reads DATABASE_URL in campusdeal/settings.py.
+- The project already uses dj-database-url and psycopg2-binary.
+- The deployment config already expects a database connection string.
+- This means the migration is mostly a database move plus an environment variable update.
+
+Step 1: Create the Supabase project
+1. Sign in to Supabase.
+2. Create a new project.
+3. Choose a strong database password and store it safely.
+4. Pick a region close to your backend deployment and users.
+
+Step 2: Get the database connection string
+1. Open the Supabase project dashboard.
+2. Go to the database connection details.
+3. Copy the PostgreSQL connection string exactly as Supabase provides it.
+4. Prefer the direct connection string for a long-lived Django backend.
+5. If direct connection does not work from your host, use the Supabase pooler connection string.
+6. Make sure SSL is enabled if required by the provided string.
+
+Step 3: Export the old Render database
+If the old Render database can still be accessed, export it immediately before anything else.
+
+Example dump:
+pg_dump "$OLD_DATABASE_URL" --no-owner --no-privileges --format=custom --file=campusdeal.dump
+
+If you only have SQL:
+psql "$OLD_DATABASE_URL" -f backup.sql
+
+Step 4: Import into Supabase
+For a custom dump:
+pg_restore --clean --if-exists --no-owner --no-privileges --dbname="$SUPABASE_DATABASE_URL" campusdeal.dump
+
+For a plain SQL backup:
+psql "$SUPABASE_DATABASE_URL" -f backup.sql
+
+Step 5: Point Django to Supabase
+1. Update the backend environment variable DATABASE_URL to the Supabase connection string.
+2. Keep the database secret only on the server side.
+3. Do not put the database URL in the mobile app or frontend app.
+
+Where this repo reads the database URL
+- campusdeal/settings.py uses DATABASE_URL if it exists.
+- If DATABASE_URL is missing, the project falls back to SQLite for local development.
+
+Step 6: Deploy and migrate
+After updating DATABASE_URL:
+1. Redeploy the backend.
+2. Run Django migrations on the new database.
+3. Run a health check.
+4. Smoke test the main flows.
+
+Suggested commands:
+python manage.py migrate
+python manage.py check
+
+Step 7: Verify the critical flows
+Test these before telling the mobile developer to proceed:
+- Login and registration
+- Password reset
+- Marketplace listing creation and browsing
+- Order checkout
+- Wallet top-up
+- Withdrawal flow
+- Refund flow
+- Chat endpoints
+- Health endpoint
+
+Step 8: Update deployment environment
+If you are still using Render for the backend:
+1. Set the backend service DATABASE_URL to the Supabase connection string.
+2. Keep DEBUG disabled in production.
+3. Keep ALLOWED_HOSTS and CORS settings aligned with your live frontend domains.
+
+Supabase connection notes
+- Direct connection is usually best for a backend server.
+- Pooler connection is a fallback if network restrictions or IPv4 issues appear.
+- Use the exact connection string Supabase provides instead of constructing one manually unless you know the required parameters.
+
+Rollback plan
+If something fails:
+1. Switch DATABASE_URL back to the previous working database if it still exists.
+2. Redeploy.
+3. Investigate the import or migration issue before retrying.
+
+Practical recommendation
+1. Create Supabase.
+2. Export the Render database as soon as possible.
+3. Import into Supabase.
+4. Update DATABASE_URL.
+5. Deploy backend.
+6. Verify with real API calls.
+7. Then hand the mobile developer the API base URL and docs.
+
+Result
+Once the backend is talking to Supabase and the API smoke tests pass, the mobile app can safely consume the API as normal.

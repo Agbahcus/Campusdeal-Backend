@@ -230,25 +230,16 @@ def _withdraw_funds_impl(request):
             profile.refresh_from_db()
             balance_after = profile.wallet_balance
 
-            transfer_result = paystack_service.initiate_transfer(amount=net_amount, recipient_code=bank_account.recipient_code, reason=f"CampusDeal withdrawal - {user.get_full_name()}")
-
-            if not transfer_result['success']:
-                Profile.objects.filter(user=user).update(wallet_balance=F('wallet_balance') + amount)
-                send_finance_alert(
-                    subject='CampusDeal withdrawal transfer failed',
-                    message=f"User {user.id} | amount={amount} | bank={bank_account.bank_name} | error={transfer_result['error']}",
-                )
-                return Response({"error": f"Transfer failed: {transfer_result['error']}"}, status=status.HTTP_400_BAD_REQUEST)
-
+            # Create withdrawal record with status='pending' first
             withdrawal = Withdrawal.objects.create(
                 user=user,
                 bank_account=bank_account,
                 amount=amount,
                 withdrawal_fee=WITHDRAWAL_FEE,
                 net_amount=net_amount,
-                transfer_code=transfer_result['transfer_code'],
+                transfer_code=None,
                 reference=reference,
-                status='processing',
+                status='pending',
                 wallet_balance_before=balance_before,
                 wallet_balance_after=balance_after,
             )
@@ -271,25 +262,85 @@ def _withdraw_funds_impl(request):
                 related_withdrawal=withdrawal,
                 created_by=user,
             )
-
-            run_after_commit(
-                'withdrawal-notify',
-                send_user_sms_notification,
-                user,
-                f"CampusDeal withdrawal of ₦{amount} has been initiated successfully. Reference: {reference}.",
-            )
-            run_after_commit(
-                'withdrawal-reconcile',
-                refresh_financial_reconciliation_snapshot,
-                f'withdrawal {reference}',
-            )
-
     except Exception as e:
         send_finance_alert(
-            subject='CampusDeal withdrawal processing error',
+            subject='CampusDeal withdrawal preparation failed',
             message=f"User {user.id} | amount={amount} | error={str(e)}",
         )
         return Response({"error": f"Withdrawal processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Initiate Paystack transfer outside of database transaction
+    try:
+        transfer_result = paystack_service.initiate_transfer(
+            amount=net_amount,
+            recipient_code=bank_account.recipient_code,
+            reason=f"CampusDeal withdrawal - {user.get_full_name() or user.username}"
+        )
+    except Exception as e:
+        transfer_result = {'success': False, 'error': str(e)}
+
+    if transfer_result.get('success'):
+        with db_transaction.atomic():
+            withdrawal.status = 'processing'
+            withdrawal.transfer_code = transfer_result['transfer_code']
+            withdrawal.save(update_fields=['status', 'transfer_code'])
+
+        run_after_commit(
+            'withdrawal-notify',
+            send_user_sms_notification,
+            user,
+            f"CampusDeal withdrawal of ₦{amount} has been initiated successfully. Reference: {reference}.",
+        )
+        run_after_commit(
+            'withdrawal-reconcile',
+            refresh_financial_reconciliation_snapshot,
+            f'withdrawal {reference}',
+        )
+    else:
+        error_msg = transfer_result.get('error', 'Unknown Paystack error')
+        try:
+            with db_transaction.atomic():
+                profile = Profile.objects.select_for_update().get(user=user)
+                balance_before = profile.wallet_balance
+                Profile.objects.filter(user=user).update(wallet_balance=F('wallet_balance') + amount)
+                profile.refresh_from_db()
+                balance_after = profile.wallet_balance
+
+                withdrawal.status = 'failed'
+                withdrawal.failure_reason = error_msg
+                withdrawal.save(update_fields=['status', 'failure_reason'])
+
+                WalletTransaction.objects.create(
+                    user=user,
+                    transaction_type='credit',
+                    amount=amount,
+                    source='refund',
+                    balance_before=balance_before,
+                    balance_after=balance_after,
+                    reference=f"REV-{reference}",
+                )
+
+                FinancialLedgerService.record_failed_withdrawal(
+                    user=user,
+                    amount=amount,
+                    withdrawal_fee=WITHDRAWAL_FEE,
+                    net_amount=net_amount,
+                    related_withdrawal=withdrawal,
+                    created_by=user,
+                    reason=error_msg,
+                )
+        except Exception as e:
+            send_finance_alert(
+                subject='CampusDeal withdrawal rollback critical error',
+                message=f"CRITICAL: Failed to reverse failed withdrawal for User {user.id} | amount={amount} | error={str(e)}",
+            )
+            return Response({"error": f"Withdrawal failed and recovery failed: {error_msg}. Platform notified."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        send_finance_alert(
+            subject='CampusDeal withdrawal transfer failed',
+            message=f"User {user.id} | amount={amount} | bank={bank_account.bank_name} | error={error_msg}",
+        )
+        return Response({"error": f"Transfer failed: {error_msg}"}, status=status.HTTP_400_BAD_REQUEST)
 
     return Response({"message": "Withdrawal initiated successfully", "withdrawal": WithdrawalSerializer(withdrawal).data, "details": {"total_amount": str(amount), "withdrawal_fee": str(WITHDRAWAL_FEE), "net_amount": str(net_amount), "bank_account": f"{bank_account.account_name} - {bank_account.account_number}", "estimated_time": "Instant to 24 hours (most banks are instant)"}}, status=status.HTTP_201_CREATED)
 
@@ -313,8 +364,10 @@ def withdraw_funds(request, *args, **kwargs):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def withdrawal_history(request):
-    withdrawals = Withdrawal.objects.filter(user=request.user).select_related('bank_account').order_by('-created_at')[:50]
-    return Response({"count": withdrawals.count(), "withdrawals": WithdrawalSerializer(withdrawals, many=True).data})
+    queryset = Withdrawal.objects.filter(user=request.user)
+    total_count = queryset.count()
+    withdrawals = queryset.select_related('bank_account').order_by('-created_at')[:50]
+    return Response({"count": total_count, "withdrawals": WithdrawalSerializer(withdrawals, many=True).data})
 
 
 @api_view(['GET'])

@@ -1,0 +1,417 @@
+============================================================
+  CAMPUSDEAL BACKEND — QA FINDINGS REPORT
+  Date: July 2026
+  Scope: Full codebase review (no code changes made)
+============================================================
+
+SEVERITY LEGEND
+  [CRITICAL] — Can cause data loss, financial inconsistency, or security breach
+  [HIGH]     — Can cause broken features or incorrect behaviour in production
+  [MEDIUM]   — Potential bugs or edge cases that will surface under real usage
+  [LOW]      — Code quality, minor inconsistencies, or improvement suggestions
+  [INFO]     — Observations that are not bugs but worth knowing
+
+------------------------------------------------------------
+SECTION 1 — PAYMENT & FINANCIAL LOGIC
+------------------------------------------------------------
+
+[CRITICAL] #1 — hmac.new() does not exist in Python 3
+File: marketplace/payment_service.py, line ~88
+  hash_obj = hmac.new(
+      self.secret_key.encode('utf-8'),
+      payload,
+      hashlib.sha512,
+  )
+The correct Python 3 function is hmac.new() — wait, actually in Python 3 the
+correct call IS hmac.new(key, msg, digestmod). This is valid. However the
+parameter `payload` here is request.body (bytes), and `signature` comes from
+the header as a string. The compare_digest call compares:
+  expected_signature (str, hexdigest)  vs  signature (str from header)
+This is correct. No bug here — reclassified as INFO.
+STATUS: OK
+
+[HIGH] #2 — Double amount conversion to kobo in checkout
+File: marketplace/order_views.py, initialize_paystack_payment()
+  result = paystack_service.initialize_payment(
+      ...
+      amount=order.total_amount * 100,   <-- already multiplied by 100 here
+      ...
+  )
+File: marketplace/payment_service.py, initialize_payment()
+  payload = {
+      'amount': int(amount),             <-- takes the value as-is (already in kobo)
+  }
+This is actually consistent — the caller does the kobo conversion and the
+service just casts to int. No double conversion.
+However in wallet_views.py add_funds_to_wallet():
+  amount=amount * 100,  # Convert to kobo
+Same pattern — consistent. No bug.
+STATUS: OK
+
+[HIGH] #3 — Wallet balance check race condition before atomic block
+File: marketplace/withdrawal_views.py, _withdraw_funds_impl()
+  profile = user.profile                        # line ~155 — reads balance outside atomic
+  if profile.wallet_balance < amount:           # first check (no lock)
+      return Response(...)
+  ...
+  with db_transaction.atomic():
+      profile = Profile.objects.select_for_update().get(user=user)  # second check (locked)
+      if profile.wallet_balance < amount:       # correct second check inside atomic
+The first check outside the atomic block is a soft pre-check without a lock.
+This is fine as a UX optimisation (fail fast) because the real enforced check
+is inside the atomic block with select_for_update. No actual race condition
+vulnerability because the locked check protects the write.
+STATUS: OK (double-check is intentional)
+
+[HIGH] #4 — Paystack transfer initiated BEFORE Withdrawal record is saved
+File: marketplace/withdrawal_views.py, _withdraw_funds_impl()
+  Profile balance is deducted → transfer_result = paystack_service.initiate_transfer(...)
+  If Paystack succeeds but Withdrawal.objects.create() then throws a DB error,
+  the money has left Paystack but there is no Withdrawal record in the DB.
+  The wallet balance was already deducted. The user loses money with no trace.
+  The manual rollback:
+    Profile.objects.filter(user=user).update(wallet_balance=F('wallet_balance') + amount)
+  only fires if transfer_result['success'] is False — it does NOT fire on a DB
+  exception after a successful transfer.
+  The outer try/except catches the exception but by then the transfer already
+  happened and the rollback inside the atomic block will revert the wallet
+  deduction — but the Paystack transfer is NOT reversible automatically.
+  This is the most critical financial bug in the codebase.
+SEVERITY: CRITICAL
+IMPACT: User's wallet is debited and restored by atomic rollback, but the
+  Paystack transfer may have already gone through. Net result: user receives
+  the money in their bank AND gets their wallet balance back. Platform loses
+  the money.
+RECOMMENDATION: Save the Withdrawal record BEFORE calling Paystack transfer,
+  with status='pending'. Then call transfer. Update status after.
+
+[MEDIUM] #5 — PlatformFinancials updated outside the order's atomic block
+File: marketplace/ledger_service.py, record_order_payment()
+  The ledger service opens its own inner transaction.atomic() block. But it is
+  called from order_views.py AFTER the outer db_transaction.atomic() block
+  has already committed (it's called inside the with block but the
+  FinancialLedgerService also wraps itself in atomic()). This creates a
+  nested transaction. In SQLite (dev) nested transactions are silently
+  treated as savepoints. In PostgreSQL (production) this is correct but
+  if the inner ledger transaction fails, the outer order transaction may have
+  already committed.
+  Actually on closer inspection record_order_payment is called inside the
+  outer atomic block in verify_payment — so both are inside one atomic
+  context. PostgreSQL will use savepoints. This is acceptable.
+STATUS: OK (acceptable with PostgreSQL savepoints)
+
+[MEDIUM] #6 — duplicate import in ledger_service.py
+File: marketplace/ledger_service.py, lines 1-2
+  from decimal import Decimal
+  from decimal import Decimal   <-- duplicate import
+Minor but sloppy. No functional impact.
+SEVERITY: LOW
+
+------------------------------------------------------------
+SECTION 2 — SECURITY
+------------------------------------------------------------
+
+[HIGH] #7 — Admin endpoints protected only by is_staff check, not a permission class
+Files: marketplace/refund_views.py, marketplace/admin_views.py
+  if not request.user.is_staff:
+      return Response({"error": "Admin access required"}, ...)
+This works correctly but is a manual inline check rather than a DRF permission
+class. If a developer adds a new endpoint and forgets this check, admin
+routes are exposed. Not a current bug but a structural risk.
+SEVERITY: MEDIUM (structural risk, not an active vulnerability)
+
+[HIGH] #8 — JWT token exposed in WebSocket URL as query parameter
+File: communication/ws_middleware.py
+  token = query_params.get('token', [None])[0]
+WebSocket connections pass the JWT as ?token=<jwt> in the URL. URLs are
+logged by web servers, proxies, and Render's own logging. This means JWT
+tokens are being written to server logs in plaintext.
+SEVERITY: HIGH
+IMPACT: Anyone with access to server logs (Render dashboard, any team member)
+  can extract valid JWT tokens and impersonate users until the token expires
+  (60 minutes).
+RECOMMENDATION: Use a short-lived one-time ticket system for WebSocket auth
+  instead of passing the full JWT in the URL.
+
+[MEDIUM] #9 — No rate limiting on payment verify endpoint
+File: marketplace/order_views.py, verify_payment()
+File: marketplace/wallet_views.py, verify_wallet_deposit()
+These endpoints make outbound calls to Paystack on every request. There is
+no rate limiting. An attacker could spam these endpoints causing:
+  1. Unnecessary Paystack API calls (rate limit exhaustion on Paystack side)
+  2. Increased server load
+SEVERITY: MEDIUM
+
+[MEDIUM] #10 — FRONTEND_URL not validated
+File: marketplace/order_views.py, initialize_paystack_payment()
+File: marketplace/wallet_views.py, add_funds_to_wallet()
+  callback_url = f'{settings.FRONTEND_URL}/payment/verify'
+If FRONTEND_URL is not set in environment variables, this becomes
+"None/payment/verify" as the callback URL sent to Paystack. This won't
+break payment processing (webhook handles it) but produces garbage callback
+URLs in the Paystack dashboard.
+SEVERITY: LOW
+
+[LOW] #11 — Secret key loaded at module instantiation time
+File: marketplace/payment_service.py
+  paystack_service = PaystackService()  # singleton at module load
+  def __init__(self):
+      self.secret_key = settings.PAYSTACK_SECRET_KEY
+If PAYSTACK_SECRET_KEY is missing from env vars, this fails silently at
+startup or raises AttributeError on first use rather than failing loudly
+at boot. No explicit validation that the key is non-empty.
+SEVERITY: LOW
+
+------------------------------------------------------------
+SECTION 3 — BUG FINDINGS
+------------------------------------------------------------
+
+[HIGH] #12 — openChat() in app.js references undefined variable 'messages'
+File: campusdeal-frontend (noted for mobile dev awareness)
+  const [chat, messagesResponse] = await Promise.all([...])
+  ...
+  renderMessages(messages)   <-- 'messages' is undefined, should be:
+  renderMessages(API.unwrapCollection(messagesResponse).slice().reverse())
+This is a frontend bug but it means the chat screen will show a blank
+message list when first opened via the openChat() function. The WebSocket
+connect.connected event reloads messages as a workaround, so it may not
+be visible in all cases.
+SEVERITY: HIGH (frontend, not backend)
+
+[HIGH] #13 — withdrawal_history() returns QuerySet.count() after slicing
+File: marketplace/withdrawal_views.py, withdrawal_history()
+  withdrawals = Withdrawal.objects.filter(...).order_by('-created_at')[:50]
+  return Response({"count": withdrawals.count(), ...})
+Calling .count() on a sliced QuerySet ([:50]) raises a TypeError in Django
+because sliced QuerySets do not support .count(). This will throw a 500
+error every time the withdrawal history endpoint is called.
+SEVERITY: HIGH
+FIX: Use len(withdrawals) instead of withdrawals.count() after slicing,
+  or count before slicing.
+
+[HIGH] #14 — delete_bank_account checks account.is_primary AFTER account.delete()
+File: marketplace/withdrawal_views.py, delete_bank_account()
+  account.delete()                          # account is deleted here
+  if account.is_primary and account_count > 1:    # then checks its is_primary
+      first_remaining = BankAccount.objects.filter(user=request.user).first()
+      if first_remaining:
+          first_remaining.is_primary = True
+          first_remaining.save()
+account.is_primary is still accessible on the Python object after .delete()
+(Django keeps the in-memory state), so this technically works. But it is
+logically fragile — if the object state were ever reset before this check,
+the primary flag would never be reassigned. Works today, but is a reliability
+risk.
+SEVERITY: MEDIUM (works but fragile)
+
+[MEDIUM] #15 — confirm_delivery allows status 'paid' (not just 'delivered')
+File: marketplace/order_views.py, confirm_delivery()
+  if order.status not in ['delivered', 'paid']:
+An order in 'paid' status means the seller hasn't even started preparing it
+yet. Allowing the buyer to confirm delivery and release funds at this stage
+means the seller gets paid before actually delivering anything.
+SEVERITY: HIGH
+IMPACT: Buyer could accidentally (or intentionally) trigger fund release
+  before the seller ships. Seller gets paid, buyer has no item.
+RECOMMENDATION: Only allow confirm_delivery when status == 'delivered'.
+
+[MEDIUM] #16 — No validation that proposed_price is not absurdly low
+File: marketplace/offer_views.py, send_offer()
+  if proposed_price <= 0:
+      raise ValueError
+A buyer can send an offer of ₦0.01 for an item worth ₦50,000. There is no
+minimum offer validation (e.g. at least 10% of listing price).
+SEVERITY: LOW (business logic, not a security issue)
+
+[MEDIUM] #17 — Order cancellation refunds total_amount but only checks funds_held
+File: marketplace/order_views.py, cancel_order()
+  if order.status == 'paid' and order.funds_held:
+      FinancialLedgerService.process_order_refund(order=order, ...)
+process_order_refund credits order.total_amount to the buyer wallet.
+But the service fee (3.5%) is platform revenue — refunding total_amount
+means the platform refunds its own service fee too. This may be intentional
+policy but is worth confirming.
+SEVERITY: LOW (policy question)
+
+[MEDIUM] #18 — Background thread pool has no graceful shutdown
+File: marketplace/background_jobs.py
+  _EXECUTOR = ThreadPoolExecutor(max_workers=4, ...)
+The ThreadPoolExecutor has no shutdown hook registered with Django's
+AppConfig or Python's atexit. On a SIGTERM (e.g. Render deploy restart),
+in-flight background jobs (SMS notifications, reconciliation) will be
+killed mid-execution without completing.
+SEVERITY: MEDIUM
+IMPACT: Notifications may not be sent during deploys. Reconciliation
+  snapshots may be incomplete.
+
+[LOW] #19 — get_object_or_404 used inside async WebSocket consumer with sync_to_async
+File: communication/consumers.py, _get_chat()
+  return await sync_to_async(get_object_or_404, thread_sensitive=True)(Chat, id=self.chat_id)
+get_object_or_404 raises Http404 on miss. In a WebSocket context, Http404
+is not automatically translated to a close event — it will propagate as an
+unhandled exception in the async consumer. The connect() method does check
+`if not self.chat` so if get_object_or_404 raises instead of returning None,
+the close(4404) will not be called cleanly.
+SEVERITY: MEDIUM
+RECOMMENDATION: Use Chat.objects.filter(id=self.chat_id).first() instead,
+  which returns None on miss and is handled correctly by the existing check.
+
+------------------------------------------------------------
+SECTION 4 — CODE QUALITY
+------------------------------------------------------------
+
+[LOW] #20 — duplicate import of Decimal in ledger_service.py
+File: marketplace/ledger_service.py, lines 1 and 3
+  from decimal import Decimal  (twice)
+No functional impact.
+
+[LOW] #21 — setup_views.py imported unconditionally but only registered in DEBUG
+File: marketplace/urls.py
+  from . import setup_views  # TEMPORARY - DELETE AFTER SETUP
+  ...
+  if settings.DEBUG:
+      urlpatterns.append(path('setup/', setup_views.initial_setup, ...))
+The import happens at module load time regardless of DEBUG. The route is
+only registered in DEBUG mode, so the endpoint is not exposed in production.
+But the file is still imported in production unnecessarily.
+Comment says "TEMPORARY - DELETE AFTER SETUP" — this should be removed.
+SEVERITY: LOW
+
+[LOW] #22 — withdraw_funds() wrapper function is unnecessarily complex
+File: marketplace/withdrawal_views.py
+The withdraw_funds → _withdraw_funds_api → _withdraw_funds_impl chain exists
+to handle both DRF Request and raw Django HttpRequest objects. In practice
+DRF's @api_view decorator always wraps the request in a DRF Request object,
+so the unwrapping logic in _withdraw_funds_impl is dead code. The wrapper
+adds complexity without benefit.
+SEVERITY: LOW
+
+[LOW] #23 — settings.py DEBUG logic is inverted / confusing
+File: campusdeal/settings.py
+  def _parse_debug_flag(value, default=True):
+      if normalized in {'1', 'true', ... 'release', 'prod', 'production', 'live'}:
+          return True   <-- 'production' maps to DEBUG=True ??
+The values 'release', 'prod', 'production', 'live' return True (DEBUG ON).
+This seems inverted — production environments should have DEBUG=False.
+If someone sets DEBUG=production in their env vars expecting it to mean
+"we are in production (debug off)", they will instead run with DEBUG=True.
+SEVERITY: HIGH
+IMPACT: DEBUG=True in production exposes full stack traces in API error
+  responses, which leaks internal code structure and DB details to clients.
+
+[LOW] #24 — RATELIMIT_ENABLE not used by any custom middleware
+File: campusdeal/settings.py
+  RATELIMIT_ENABLE = True
+  RATELIMIT_USE_CACHE = 'default'
+django-ratelimit decorators (@ratelimit) read RATELIMIT_ENABLE from settings
+automatically, so this is correct. No bug. Just confirming it is wired up.
+STATUS: OK
+
+[INFO] #25 — No pagination on withdrawal_history
+File: marketplace/withdrawal_views.py
+  withdrawals = Withdrawal.objects.filter(...).order_by('-created_at')[:50]
+Hard-coded to last 50 withdrawals with no pagination support. For active
+users this may be insufficient. Not a bug.
+SEVERITY: INFO
+
+[INFO] #26 — Service fee hardcoded as 3.5% in three separate places
+Files: marketplace/order_views.py (initiate_order, buyer_order),
+       marketplace/offer_views.py (respond_to_offer)
+  service_fee = item_price * Decimal('0.035')
+If the fee rate ever changes, it must be updated in 3 places. Should be a
+named constant or settings variable.
+SEVERITY: LOW
+
+[INFO] #27 — No email confirmation on registration
+File: accounts/views.py, register_user()
+Only phone OTP verification is used. Email is collected but never verified.
+If phone OTP delivery fails (SMS provider down), the user is stuck with no
+alternative verification path.
+SEVERITY: INFO (by design, but a resilience concern)
+
+[INFO] #28 — Thread-local singleton paystack_service may share state in async
+File: marketplace/payment_service.py
+  paystack_service = PaystackService()
+The singleton is module-level. In an async/ASGI environment (Channels),
+module-level singletons are shared across all requests in the same worker
+process. PaystackService holds no mutable state (only reads settings),
+so this is safe. Confirmed OK.
+STATUS: OK
+
+------------------------------------------------------------
+SECTION 5 — CONFIGURATION & DEPLOYMENT
+------------------------------------------------------------
+
+[HIGH] #29 — ALLOWED_HOSTS does not include the mobile app's domain
+File: campusdeal/settings.py
+  ALLOWED_HOSTS = config(
+      'ALLOWED_HOSTS',
+      default='localhost,127.0.0.1,campusdeal-backend.onrender.com',
+  )
+The default is fine for Render deployment but if the domain ever changes
+or a custom domain is added, requests will be rejected with a 400 Bad Request.
+This must be kept up to date in the Render environment variables.
+SEVERITY: INFO (operational reminder)
+
+[MEDIUM] #30 — Redis is optional but WebSockets silently fall back to InMemory
+File: campusdeal/settings.py
+  if REDIS_URL:
+      CHANNEL_LAYERS = { 'default': { 'BACKEND': 'channels_redis...' } }
+  else:
+      CHANNEL_LAYERS = { 'default': { 'BACKEND': 'channels.layers.InMemoryChannelLayer' } }
+InMemoryChannelLayer does NOT work across multiple worker processes or Dyno
+instances. On Render, if more than one instance is running (horizontal scale),
+WebSocket messages sent from one worker will not be received by a client
+connected to a different worker. Chat will silently break under load.
+SEVERITY: MEDIUM (fine for single-instance, breaks at scale)
+RECOMMENDATION: Set REDIS_URL in Render environment variables before scaling.
+
+[LOW] #31 — DEFAULT_FROM_EMAIL not set
+File: marketplace/background_jobs.py, send_finance_alert()
+  from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+Django's default DEFAULT_FROM_EMAIL is 'webmaster@localhost'. Finance alert
+emails will appear to come from webmaster@localhost in production if this
+setting is not explicitly configured, and may be rejected by email servers.
+SEVERITY: LOW
+
+------------------------------------------------------------
+SUMMARY TABLE
+------------------------------------------------------------
+
+ #   | Severity | Area              | Short Description
+-----|----------|-------------------|-----------------------------------
+ 4   | CRITICAL | Financial         | Withdrawal: transfer before DB record saved
+ 8   | HIGH     | Security          | JWT in WebSocket URL — logged in plaintext
+ 12  | HIGH     | Frontend Bug      | messages variable undefined in openChat()
+ 13  | HIGH     | Bug               | withdrawal_history() — .count() on sliced QS → 500
+ 14  | HIGH     | Bug               | confirm_delivery allows 'paid' status (pre-delivery)
+ 23  | HIGH     | Configuration     | DEBUG flag logic inverted — 'production' = DEBUG True
+ 7   | MEDIUM   | Security          | Admin checks inline, not permission class
+ 9   | MEDIUM   | Security          | No rate limiting on payment verify endpoints
+ 15  | MEDIUM   | Bug (fragile)     | delete_bank_account checks is_primary after delete()
+ 19  | MEDIUM   | Bug               | get_object_or_404 in async consumer raises Http404
+ 18  | MEDIUM   | Reliability       | ThreadPoolExecutor has no graceful shutdown
+ 30  | MEDIUM   | Deployment        | InMemoryChannelLayer breaks WS at multi-instance scale
+ 6   | LOW      | Code Quality      | Duplicate Decimal import in ledger_service.py
+ 10  | LOW      | Bug               | FRONTEND_URL not set → callback_url = "None/..."
+ 11  | LOW      | Config            | PAYSTACK_SECRET_KEY not validated at startup
+ 16  | LOW      | Business Logic    | No minimum offer price validation
+ 17  | LOW      | Business Logic    | Cancel refunds full total_amount incl. service fee
+ 21  | LOW      | Code Quality      | setup_views.py should be deleted after setup
+ 22  | LOW      | Code Quality      | withdraw_funds() wrapper is unnecessarily complex
+ 26  | LOW      | Code Quality      | Service fee 3.5% hardcoded in 3 places
+ 31  | LOW      | Config            | DEFAULT_FROM_EMAIL not set
+
+------------------------------------------------------------
+PRIORITY ACTIONS (fix before going to production)
+------------------------------------------------------------
+
+1. FIX #4  — Save Withdrawal record before calling Paystack transfer
+2. FIX #13 — Replace withdrawals.count() with len(withdrawals) after [:50] slice
+3. FIX #15 — Change confirm_delivery to only allow status == 'delivered'
+4. FIX #23 — Fix the DEBUG flag parser — 'production'/'prod' should return False
+5. REVIEW #8 — Plan to move WebSocket auth away from URL query param JWT
+
+============================================================
+END OF REPORT
+============================================================

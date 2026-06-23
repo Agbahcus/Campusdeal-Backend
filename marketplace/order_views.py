@@ -596,7 +596,7 @@ def confirm_delivery(request, order_id):
     """
     order = get_object_or_404(Order, order_id=order_id, buyer=request.user)
 
-    if order.status not in ['delivered', 'paid']:
+    if order.status != 'delivered':
         return Response({'error': 'Order must be delivered before confirmation'}, status=status.HTTP_400_BAD_REQUEST)
 
     with db_transaction.atomic():
