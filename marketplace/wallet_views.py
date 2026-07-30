@@ -4,6 +4,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.db import transaction as db_transaction
+from django_ratelimit.decorators import ratelimit
 from decimal import Decimal
 
 from .models import WalletTransaction
@@ -71,6 +72,7 @@ def get_wallet_transactions(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@ratelimit(key='user', rate='10/h', method='POST', block=True)
 def add_funds_to_wallet(request):
     """
     Add funds to wallet via Paystack

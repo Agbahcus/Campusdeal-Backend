@@ -10,6 +10,7 @@ from django.utils import timezone
 from decimal import Decimal, InvalidOperation
 from datetime import timedelta
 from rest_framework import serializers
+from django_ratelimit.decorators import ratelimit
 
 from .models import Withdrawal, WalletTransaction
 from accounts.models import Profile, BankAccount
@@ -37,7 +38,7 @@ class BankAccountSerializer(serializers.ModelSerializer):
 
 class WithdrawalSerializer(serializers.ModelSerializer):
     bank_account_details = BankAccountSerializer(source='bank_account', read_only=True)
-    
+
     class Meta:
         model = Withdrawal
         fields = ['id', 'amount', 'withdrawal_fee', 'net_amount', 'bank_account', 'bank_account_details', 'status', 'failure_reason', 'reference', 'created_at', 'completed_at']
@@ -59,18 +60,18 @@ class WithdrawalRequestSerializer(serializers.Serializer):
 def verify_bank_account(request):
     account_number = request.data.get('account_number', '').strip()
     bank_code = request.data.get('bank_code', '').strip()
-    
+
     if not account_number or not bank_code:
         return Response({"error": "Account number and bank code required"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if not account_number.isdigit() or len(account_number) != 10:
         return Response({"error": "Invalid account number. Must be 10 digits"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     result = paystack_service.verify_account_number(account_number, bank_code)
-    
+
     if not result['success']:
         return Response({"error": result['error']}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     return Response({"account_number": result['account_number'], "account_name": result['account_name'], "message": "Account verified successfully"})
 
 
@@ -81,37 +82,37 @@ def add_bank_account(request):
     account_number = request.data.get('account_number', '').strip()
     bank_code = request.data.get('bank_code', '').strip()
     bank_name = request.data.get('bank_name', '').strip()
-    
+
     if not all([account_number, bank_code, bank_name]):
         return Response({"error": "All fields required: account_number, bank_code, bank_name"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if not account_number.isdigit() or len(account_number) != 10:
         return Response({"error": "Invalid account number. Must be 10 digits"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     verification = paystack_service.verify_account_number(account_number, bank_code)
-    
+
     if not verification['success']:
         return Response({"error": f"Account verification failed: {verification['error']}"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     account_name = verification['account_name']
-    
+
     if BankAccount.objects.filter(user=user, account_number=account_number, bank_code=bank_code).exists():
         return Response({"error": "This bank account is already linked to your profile"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     recipient_result = paystack_service.create_transfer_recipient(account_number=account_number, bank_code=bank_code, account_name=account_name)
-    
+
     if not recipient_result['success']:
         return Response({"error": f"Failed to register bank account: {recipient_result['error']}"}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     is_primary = not BankAccount.objects.filter(user=user).exists()
-    
+
     set_as_primary = request.data.get('set_as_primary')
     if str(set_as_primary).lower() in {'true', '1', 'yes', 'on'} or is_primary:
         BankAccount.objects.filter(user=user).update(is_primary=False)
         is_primary = True
-    
+
     bank_account = BankAccount.objects.create(user=user, account_number=account_number, account_name=account_name, bank_name=bank_name, bank_code=bank_code, recipient_code=recipient_result['recipient_code'], is_verified=True, is_primary=is_primary)
-    
+
     return Response({"message": "Bank account added successfully", "bank_account": BankAccountSerializer(bank_account).data}, status=status.HTTP_201_CREATED)
 
 
@@ -138,13 +139,13 @@ def delete_bank_account(request, account_id):
     account = get_object_or_404(BankAccount, id=account_id, user=request.user)
     account_count = BankAccount.objects.filter(user=request.user).count()
     account.delete()
-    
+
     if account.is_primary and account_count > 1:
         first_remaining = BankAccount.objects.filter(user=request.user).first()
         if first_remaining:
             first_remaining.is_primary = True
             first_remaining.save()
-    
+
     return Response({"message": "Bank account removed successfully"})
 
 
@@ -159,7 +160,6 @@ def _get_request_payload(request):
 
 
 def _withdraw_funds_impl(request):
-    # internal implementation expects a DRF Request-like object with `.data` and `.user`
     request_user = getattr(request, 'user', None)
     underlying_request = getattr(request, '_request', None)
     if not (hasattr(request_user, 'is_authenticated') and request_user.is_authenticated):
@@ -187,7 +187,7 @@ def _withdraw_funds_impl(request):
     today_withdrawals_total = Withdrawal.objects.filter(user=user, created_at__gte=today_start, status__in=['success', 'processing', 'pending']).aggregate(total=Sum('amount'))['total'] or Decimal('0')
 
     if today_withdrawals_total + amount > MAX_WITHDRAWAL_PER_DAY:
-        return Response({"error": f"Daily withdrawal limit exceeded", "daily_limit": str(MAX_WITHDRAWAL_PER_DAY), "withdrawn_today": str(today_withdrawals_total), "available_today": str(MAX_WITHDRAWAL_PER_DAY - today_withdrawals_total)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"error": "Daily withdrawal limit exceeded", "daily_limit": str(MAX_WITHDRAWAL_PER_DAY), "withdrawn_today": str(today_withdrawals_total), "available_today": str(MAX_WITHDRAWAL_PER_DAY - today_withdrawals_total)}, status=status.HTTP_400_BAD_REQUEST)
 
     bank_account = None
     if bank_account_id:
@@ -230,7 +230,6 @@ def _withdraw_funds_impl(request):
             profile.refresh_from_db()
             balance_after = profile.wallet_balance
 
-            # Create withdrawal record with status='pending' first
             withdrawal = Withdrawal.objects.create(
                 user=user,
                 bank_account=bank_account,
@@ -269,7 +268,6 @@ def _withdraw_funds_impl(request):
         )
         return Response({"error": f"Withdrawal processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    # Initiate Paystack transfer outside of database transaction
     try:
         transfer_result = paystack_service.initiate_transfer(
             amount=net_amount,
@@ -348,6 +346,7 @@ def _withdraw_funds_impl(request):
 # Decorated API view that expects a Django HttpRequest (normal routing)
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+@ratelimit(key='user', rate='5/h', method='POST', block=True)
 def _withdraw_funds_api(request, *args, **kwargs):
     return _withdraw_funds_impl(request)
 
@@ -355,7 +354,6 @@ def _withdraw_funds_api(request, *args, **kwargs):
 def withdraw_funds(request, *args, **kwargs):
     from rest_framework.request import Request as DRFRequest
     if isinstance(request, DRFRequest) and hasattr(request, '_request'):
-        # unwrap to Django HttpRequest for DRF dispatch
         return _withdraw_funds_api(request._request, *args, **kwargs)
     else:
         return _withdraw_funds_api(request, *args, **kwargs)

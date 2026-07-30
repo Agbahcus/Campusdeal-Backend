@@ -504,7 +504,121 @@ def paystack_webhook(request):
             send_finance_alert(subject='CampusDeal webhook processing failed',
                 message=f'Reference: {reference}\nError: {exc}')
 
+    elif event in ('transfer.success', 'transfer.failed'):
+        _handle_transfer_webhook(event, data)
+
     return Response({'status': 'success'})
+
+
+def _handle_transfer_webhook(event, data):
+    from .models import Withdrawal
+    from django.db.models import F as DbF
+    from accounts.models import Profile
+
+    transfer_code = data.get('transfer_code')
+    reference = data.get('reference')
+
+    if not transfer_code and not reference:
+        send_finance_alert(
+            subject='CampusDeal transfer webhook missing identifiers',
+            message=f'Event: {event} | data: {data}',
+        )
+        return
+
+    try:
+        withdrawal = Withdrawal.objects.select_for_update().get(
+            transfer_code=transfer_code
+        ) if transfer_code else Withdrawal.objects.select_for_update().get(
+            reference=reference
+        )
+    except Withdrawal.DoesNotExist:
+        send_finance_alert(
+            subject='CampusDeal transfer webhook: withdrawal not found',
+            message=f'Event: {event} | transfer_code: {transfer_code} | reference: {reference}',
+        )
+        return
+    except Exception as exc:
+        send_finance_alert(
+            subject='CampusDeal transfer webhook lookup error',
+            message=f'Event: {event} | error: {exc}',
+        )
+        return
+
+    if event == 'transfer.success':
+        if withdrawal.status == 'success':
+            return
+        with db_transaction.atomic():
+            Withdrawal.objects.filter(pk=withdrawal.pk).update(
+                status='success',
+                completed_at=timezone.now(),
+            )
+        run_after_commit(
+            'transfer-success-sms',
+            send_user_sms_notification,
+            withdrawal.user,
+            f'CampusDeal: Your withdrawal of \u20a6{withdrawal.amount} was successful. Reference: {withdrawal.reference}.',
+        )
+        run_after_commit(
+            'transfer-success-reconcile',
+            refresh_financial_reconciliation_snapshot,
+            f'transfer.success {withdrawal.reference}',
+        )
+
+    elif event == 'transfer.failed':
+        if withdrawal.status in ('failed', 'reversed'):
+            return
+        failure_reason = data.get('reason', 'Transfer failed')
+        try:
+            with db_transaction.atomic():
+                profile = Profile.objects.select_for_update().get(user=withdrawal.user)
+                balance_before = profile.wallet_balance
+                Profile.objects.filter(user=withdrawal.user).update(
+                    wallet_balance=DbF('wallet_balance') + withdrawal.amount
+                )
+                profile.refresh_from_db()
+
+                WalletTransaction.objects.create(
+                    user=withdrawal.user,
+                    transaction_type='credit',
+                    amount=withdrawal.amount,
+                    source='refund',
+                    balance_before=balance_before,
+                    balance_after=profile.wallet_balance,
+                    reference=f'REV-{withdrawal.reference}',
+                )
+
+                FinancialLedgerService.record_failed_withdrawal(
+                    user=withdrawal.user,
+                    amount=withdrawal.amount,
+                    withdrawal_fee=withdrawal.withdrawal_fee,
+                    net_amount=withdrawal.net_amount,
+                    related_withdrawal=withdrawal,
+                    created_by=None,
+                    reason=failure_reason,
+                )
+
+                Withdrawal.objects.filter(pk=withdrawal.pk).update(
+                    status='failed',
+                    failure_reason=failure_reason,
+                    completed_at=timezone.now(),
+                )
+        except Exception as exc:
+            send_finance_alert(
+                subject='CampusDeal transfer.failed webhook reversal error',
+                message=f'CRITICAL: Could not reverse withdrawal {withdrawal.reference} | error: {exc}',
+            )
+            return
+
+        run_after_commit(
+            'transfer-failed-sms',
+            send_user_sms_notification,
+            withdrawal.user,
+            f'CampusDeal: Your withdrawal of \u20a6{withdrawal.amount} failed. The amount has been returned to your wallet. Reference: {withdrawal.reference}.',
+        )
+        send_finance_alert(
+            subject='CampusDeal transfer failed — wallet reversed',
+            message=f'User {withdrawal.user.id} | amount={withdrawal.amount} | reference={withdrawal.reference} | reason={failure_reason}',
+        )
 
 
 @api_view(['GET'])
